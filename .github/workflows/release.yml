@@ -17,6 +17,17 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+defaults:
+  run:
+    # A container job's `run:` defaults to `sh -e {0}`, not `bash` — the runner
+    # cannot assume bash exists in an arbitrary image. In debian:bookworm /bin/sh
+    # is dash, which has no `set -o pipefail`: every step below that opens with
+    # `set -euo pipefail` died on line 1 with "Illegal option -o pipefail" (exit 2)
+    # before running a single command. The steps also use `[[ ]]` and `<<<`.
+    # Naming bash here applies to every job, container or not, and is what the
+    # non-container jobs were already getting implicitly.
+    shell: bash
+
 env:
   CARGO_TERM_COLOR: always
   # .cargo/config.toml points build.target-dir at an absolute path in the author's

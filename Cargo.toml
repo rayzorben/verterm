@@ -1,6 +1,6 @@
 [package]
 name = "verterm"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "GPU-accelerated, keyboard-centric Linux terminal with a vertical tab tree, /proc-driven session classification, and summon-only local AI"
 license = "MIT"
