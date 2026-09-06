@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metadata, shared by every package format. Substituted by
+  packaging/build-payload.sh: @VERSION@, @DATE@ (UTC, ISO-8601), @URL@, @APPID@, @OWNER@, @OWNER_ID@.
+
+  The component id is reverse-DNS, but the desktop file it points at is NOT named
+  after it: on Wayland the window icon is resolved app_id -> desktop entry -> Icon=,
+  and verterm's app_id is `verterm`, so the entry has to stay `verterm.desktop`.
+  <launchable> is exactly the mechanism AppStream provides for that split.
+-->
+<component type="desktop-application">
+  <id>@APPID@</id>
+  <launchable type="desktop-id">verterm.desktop</launchable>
+  <name>verterm</name>
+  <summary>GPU-accelerated, keyboard-centric terminal emulator</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <url type="homepage">@URL@</url>
+  <url type="bugtracker">@URL@/issues</url>
+  <!-- A developer id must be lowercase reverse-DNS; the name is free-form. -->
+  <developer id="io.github.@OWNER_ID@">
+    <name>@OWNER@</name>
+  </developer>
+
+  <description>
+    <p>
+      A GPU-accelerated, keyboard-centric terminal emulator for Linux, written in Rust on
+      alacritty_terminal and egui/wgpu. Wayland first, X11 as a fallback.
+    </p>
+    <ul>
+      <li>Vertical tab tree that buckets sessions as local project, SSH host, container or root shell</li>
+      <li>Per-tab job health from /proc: running/finished state, exit codes, CPU and RSS footprint, git branch</li>
+      <li>Desktop notifications when a long command finishes while the tab or window is unfocused</li>
+      <li>Vi-mode scrollback with search and yank, fast-jump hints for URLs, paths and hashes</li>
+      <li>Session search across tab identity and scrollback contents</li>
+      <li>Summon-only local AI command generation via Ollama; nothing reaches the shell without a keystroke</li>
+    </ul>
+  </description>
+
+  <categories>
+    <category>System</category>
+    <category>TerminalEmulator</category>
+  </categories>
+
+  <keywords>
+    <keyword>terminal</keyword>
+    <keyword>shell</keyword>
+    <keyword>prompt</keyword>
+    <keyword>command</keyword>
+  </keywords>
+
+  <provides>
+    <binary>verterm</binary>
+  </provides>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="@VERSION@" date="@DATE@">
+      <url type="details">@URL@/releases/tag/v@VERSION@</url>
+    </release>
+  </releases>
+</component>

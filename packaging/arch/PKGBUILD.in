@@ -1,0 +1,60 @@
+# Maintainer: @MAINTAINER@
+#
+# Packages the prebuilt payload from packaging/build-payload.sh. The binary is
+# already stripped and carries no debuginfo, so makepkg's own strip/debug passes
+# are turned off rather than left to no-op noisily.
+
+pkgname=verterm
+# pkgver may not contain a hyphen, so a pre-release tag arrives here as 0.2.0_rc.1
+# while the payload tarball keeps the semver name from the tag.
+pkgver=@VERSION@
+_srcver=@SRCVER@
+pkgrel=1
+pkgdesc="GPU-accelerated, keyboard-centric terminal emulator with a vertical tab tree and /proc-driven session classification"
+arch=('x86_64')
+url="@URL@"
+license=('MIT')
+
+# glibc/gcc-libs/openssl are the binary's DT_NEEDED entries. The rest are dlopen'ed
+# at runtime, so namcap cannot see them: libxkbcommon for keyboard handling, wayland
+# for the primary backend, vulkan-icd-loader for the wgpu renderer, and fontconfig
+# for fc-match, which resolves the configured font families.
+depends=('glibc' 'gcc-libs' 'openssl' 'libxkbcommon' 'wayland' 'vulkan-icd-loader' 'fontconfig')
+
+# The X11 fallback backend, the GL fallback renderer, and the optional integrations.
+optdepends=(
+  'libxkbcommon-x11: X11 fallback backend'
+  'libx11: X11 fallback backend'
+  'libxcb: X11 fallback backend'
+  'libxcursor: X11 fallback backend'
+  'libxi: X11 fallback backend'
+  'libglvnd: OpenGL fallback when no Vulkan driver is present'
+  'git: branch and dirty-state badges on local tabs'
+  'xdg-utils: opening URLs from fast-jump hints'
+  'mako: desktop notifications when a long command finishes unfocused'
+  'dunst: desktop notifications when a long command finishes unfocused'
+  'ollama: local model backend for the summon-only AI prompt'
+)
+
+options=('!strip' '!debug' '!lto')
+source=("verterm-${_srcver}-x86_64-linux.tar.gz")
+sha256sums=('@SHA256@')
+
+package() {
+  cd "verterm-${_srcver}-x86_64-linux"
+
+  install -Dm755 bin/verterm "$pkgdir/usr/bin/verterm"
+  install -Dm644 share/applications/verterm.desktop "$pkgdir/usr/share/applications/verterm.desktop"
+  install -Dm644 share/icons/hicolor/scalable/apps/verterm.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/verterm.svg"
+  # Named after the reverse-DNS AppStream component id, not after the binary.
+  install -Dm644 -t "$pkgdir/usr/share/metainfo/" share/metainfo/*.metainfo.xml
+  install -Dm644 share/doc/verterm/README.md "$pkgdir/usr/share/doc/verterm/README.md"
+  install -Dm644 share/doc/verterm/config.example.toml \
+    "$pkgdir/usr/share/doc/verterm/config.example.toml"
+
+  # Cargo.toml declares MIT but the tree has no LICENSE file yet; ship it once it does.
+  if [[ -f share/doc/verterm/LICENSE ]]; then
+    install -Dm644 share/doc/verterm/LICENSE "$pkgdir/usr/share/licenses/verterm/LICENSE"
+  fi
+}

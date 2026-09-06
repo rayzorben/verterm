@@ -1,0 +1,533 @@
+name: Release
+
+# A `v*` tag is the trigger and the single source of truth for the version.
+# workflow_dispatch builds the exact same artifacts from any branch but publishes
+# nothing, so the packaging can be exercised without burning a tag.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # .cargo/config.toml points build.target-dir at an absolute path in the author's
+  # home. CARGO_TARGET_DIR in the environment overrides it; without this every job
+  # would silently build into /home/rayben/.cache/... inside the runner.
+  CARGO_TARGET_DIR: /tmp/verterm-target
+
+jobs:
+  # ---------------------------------------------------------------------------
+  meta:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      version_pkg: ${{ steps.v.outputs.version_pkg }}
+      version_arch: ${{ steps.v.outputs.version_arch }}
+      tag: ${{ steps.v.outputs.tag }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      publish: ${{ steps.v.outputs.publish }}
+      url: ${{ steps.v.outputs.url }}
+      maintainer: ${{ steps.v.outputs.maintainer }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the checkout can actually build
+        run: |
+          set -euo pipefail
+          # Cargo.toml carries a [patch.crates-io] entry pointing at vendor/eframe-0.36.1
+          # (upstream PR #8398, see vendor/README.md). Every path dependency has to be
+          # committed or the build fails deep inside cargo with a confusing message, so
+          # fail here instead, by name.
+          missing=()
+          while read -r p; do
+            [[ -z "$p" ]] && continue
+            [[ -e "$p" ]] || missing+=("$p")
+          done < <(grep -oE 'path[[:space:]]*=[[:space:]]*"[^"]+"' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+
+          for p in assets/verterm.svg verterm.desktop config.example.toml README.md; do
+            [[ -e "$p" ]] || missing+=("$p")
+          done
+
+          # Every `mod x;` in main.rs needs src/x.rs or src/x/mod.rs. rustc says so
+          # clearly enough, but only after the toolchain and the whole dependency tree
+          # have been built — several minutes to learn that a file was never committed.
+          while read -r m; do
+            [[ -e "src/$m.rs" || -e "src/$m/mod.rs" ]] || missing+=("src/$m.rs")
+          done < <(sed -n 's/^\(pub \)\?mod \([a-z_0-9]*\);/\2/p' src/main.rs)
+
+          if (( ${#missing[@]} )); then
+            printf '::error::missing from the checkout: %s\n' "${missing[*]}"
+            echo "These paths exist in the working tree but are not committed." >&2
+            echo "Run: git add ${missing[*]} && git commit" >&2
+            exit 1
+          fi
+
+      - name: Resolve version from the tag
+        id: v
+        run: |
+          set -euo pipefail
+          crate="$(awk -F'"' '/^\[package\]/{p=1} p && /^version[[:space:]]*=/{print $2; exit}' Cargo.toml)"
+          [[ -n "$crate" ]] || { echo "::error::could not read [package].version from Cargo.toml"; exit 1; }
+
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            tag="${GITHUB_REF_NAME}"
+            version="${tag#v}"
+            # src/main.rs reports env!("CARGO_PKG_VERSION") for --version, so a package
+            # labelled 0.2.0 containing a binary that says 0.1.0 is a shipped lie.
+            if [[ "$version" != "$crate" ]]; then
+              echo "::error::tag $tag means version $version, but Cargo.toml [package].version is $crate."
+              echo "Bump Cargo.toml (and Cargo.lock) to $version, commit, then re-tag." >&2
+              exit 1
+            fi
+            publish=true
+          else
+            version="$crate"
+            tag="v$crate"
+            publish=false
+            echo "::notice::Dry run — building v$version from ${GITHUB_REF_NAME}; nothing will be published."
+          fi
+
+          # 0.2.0-rc.1 and friends are pre-releases; plain x.y.z is not.
+          case "$version" in *-*) prerelease=true ;; *) prerelease=false ;; esac
+
+          # Semver's pre-release hyphen is illegal in an RPM Version and in a makepkg
+          # pkgver, and in a Debian version it sorts *above* the final release, so an
+          # rc would never be superseded. `~` is dpkg's and rpm's documented
+          # "sorts before nothing" marker, which fixes both.
+          #
+          # pacman has no such marker: `vercmp 0.3.0_rc.1 0.3.0` returns 1, so on Arch a
+          # pre-release still outranks its own final release. `_` is only there because
+          # a hyphen is what separates pkgver from pkgrel. Nothing here can fix the
+          # ordering — that needs an `epoch=` bump in the PKGBUILD on the final release,
+          # which is a judgement call rather than something to automate.
+          version_pkg="${version//-/\~}"
+          version_arch="${version//-/_}"
+
+          {
+            echo "version=$version"
+            echo "version_pkg=$version_pkg"
+            echo "version_arch=$version_arch"
+            echo "tag=$tag"
+            echo "publish=$publish"
+            echo "prerelease=$prerelease"
+            echo "url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+            echo "maintainer=${MAINTAINER}"
+          } >> "$GITHUB_OUTPUT"
+        env:
+          # Override with a repository variable if you want a real name and address
+          # in the deb/rpm/pacman metadata.
+          MAINTAINER: ${{ vars.PACKAGE_MAINTAINER || format('{0} <{1}@users.noreply.github.com>', github.repository_owner, github.repository_owner) }}
+
+  # ---------------------------------------------------------------------------
+  gate:
+    name: Gate (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build payload (x86_64)
+    needs: meta
+    runs-on: ubuntu-latest
+    # Built inside bookworm, not on the runner image, so the glibc floor of every
+    # release artifact is a property of this file rather than of whatever
+    # ubuntu-latest happens to point at this month. bookworm is glibc 2.36 and
+    # OpenSSL 3, which covers Debian 12+, Ubuntu 22.04+, Fedora 37+ and Arch.
+    container:
+      image: debian:bookworm
+    outputs:
+      glibc: ${{ steps.payload.outputs.glibc }}
+      tarball: ${{ steps.payload.outputs.tarball }}
+    steps:
+      - name: Install build dependencies
+        run: |
+          set -eux
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config libssl-dev file
+      # Nothing links Wayland/X11/xkbcommon/Vulkan: winit and wgpu dlopen all of
+      # them, so no -dev packages for those are needed to compile.
+
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo build --release
+        run: cargo build --locked --release
+
+      - name: Assemble payload
+        id: payload
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          URL: ${{ needs.meta.outputs.url }}
+        run: |
+          set -euo pipefail
+          bin="$CARGO_TARGET_DIR/release/verterm"
+
+          # Tag the artifacts with the floor the linker actually produced rather than
+          # with the container's advertised glibc — they are the same here, but only
+          # the binary's own symbol versions are load-bearing for the deb's Depends.
+          glibc="$(readelf -sW --dyn-syms "$bin" \
+                   | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' \
+                   | sed 's/GLIBC_//' | sort -uV | tail -1)"
+          echo "glibc floor: $glibc"
+
+          # Timestamps in the payload tarball come from the tagged commit, so two runs
+          # of the same tag produce byte-identical input for every packaging job.
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct 2>/dev/null || date -u +%s)"
+          tarball="$(bash packaging/build-payload.sh "$bin" "$VERSION" "$URL" dist)"
+
+          {
+            echo "glibc=$glibc"
+            echo "tarball=$(basename "$tarball")"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "### Payload" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tar -tzf "$tarball" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify the binary reports the tagged version
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          out="$("$CARGO_TARGET_DIR/release/verterm" --version)"
+          echo "$out"
+          grep -qF "$VERSION" <<<"$out" || {
+            echo "::error::--version printed '$out', which does not contain $VERSION"
+            exit 1
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: payload
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  deb:
+    name: Package .deb
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: payload
+          path: payload
+
+      - name: dpkg-deb --build
+        env:
+          # VERSION names the payload tarball; VERSION_PKG is the Debian version, which
+          # differs only for a pre-release (0.2.0-rc.1 -> 0.2.0~rc.1).
+          VERSION: ${{ needs.meta.outputs.version }}
+          VERSION_PKG: ${{ needs.meta.outputs.version_pkg }}
+          GLIBC: ${{ needs.build.outputs.glibc }}
+          URL: ${{ needs.meta.outputs.url }}
+          MAINTAINER: ${{ needs.meta.outputs.maintainer }}
+        run: |
+          set -euo pipefail
+          prefix="verterm-${VERSION}-x86_64-linux"
+          tar -xzf "payload/${prefix}.tar.gz"
+
+          root="deb/verterm_${VERSION_PKG}-1_amd64"
+          mkdir -p "$root/DEBIAN" "$root/usr"
+          cp -a "$prefix/bin" "$prefix/share" "$root/usr/"
+
+          size="$(du -sk "$root/usr" | cut -f1)"
+          sed -e "s|@VERSION@|$VERSION_PKG|g" \
+              -e "s|@GLIBC@|$GLIBC|g" \
+              -e "s|@URL@|$URL|g" \
+              -e "s|@MAINTAINER@|$MAINTAINER|g" \
+              -e "s|@INSTALLED_SIZE@|$size|g" \
+              packaging/deb/control.in > "$root/DEBIAN/control"
+
+          # md5sums lets `dpkg --verify` and debsums detect a tampered install.
+          ( cd "$root" && find usr -type f -print0 | sort -z | xargs -0 md5sum > DEBIAN/md5sums )
+
+          find "$root" -type d -exec chmod 755 {} +
+          out="dist/verterm_${VERSION_PKG}-1_amd64.deb"
+          mkdir -p dist
+          dpkg-deb --root-owner-group --build "$root" "$out"
+
+          dpkg-deb --info "$out"
+          dpkg-deb --contents "$out"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-deb
+          path: dist/*.deb
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  rpm:
+    name: Package .rpm
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    steps:
+      - name: Install packaging tools
+        run: dnf -y install --setopt=install_weak_deps=False rpm-build tar findutils file git
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: payload
+          path: payload
+
+      - name: rpmbuild
+        env:
+          # VERSION names the payload tarball; VERSION_PKG is the RPM Version field,
+          # which may not contain a hyphen (0.2.0-rc.1 -> 0.2.0~rc.1).
+          VERSION: ${{ needs.meta.outputs.version }}
+          VERSION_PKG: ${{ needs.meta.outputs.version_pkg }}
+          URL: ${{ needs.meta.outputs.url }}
+          MAINTAINER: ${{ needs.meta.outputs.maintainer }}
+        run: |
+          set -euo pipefail
+          top="$PWD/rpmbuild"
+          mkdir -p "$top"/{SOURCES,SPECS,RPMS,BUILD,BUILDROOT} dist
+          cp "payload/verterm-${VERSION}-x86_64-linux.tar.gz" "$top/SOURCES/"
+
+          sed -e "s|@VERSION@|$VERSION_PKG|g" \
+              -e "s|@SRCVER@|$VERSION|g" \
+              -e "s|@URL@|$URL|g" \
+              -e "s|@MAINTAINER@|$MAINTAINER|g" \
+              -e "s|@RPMDATE@|$(LC_ALL=C date -u +'%a %b %d %Y')|g" \
+              packaging/rpm/verterm.spec.in > "$top/SPECS/verterm.spec"
+
+          rpmbuild --define "_topdir $top" -bb "$top/SPECS/verterm.spec"
+          find "$top/RPMS" -name '*.rpm' -exec cp {} dist/ \;
+
+          for f in dist/*.rpm; do
+            echo "== $f"
+            rpm -qip "$f"
+            echo "-- requires"
+            rpm -qpR "$f"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-rpm
+          path: dist/*.rpm
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  arch:
+    name: Package .pkg.tar.zst
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install packaging tools
+        # archlinux-keyring goes in the same transaction: the image's keyring is
+        # frequently older than the repo it is about to sync from, and a stale one
+        # fails signature checks on everything else in the transaction.
+        run: pacman -Syu --noconfirm --needed archlinux-keyring git
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: payload
+          path: payload
+
+      - name: makepkg
+        env:
+          # VERSION names the payload tarball; VERSION_ARCH is pkgver, which may not
+          # contain a hyphen (0.2.0-rc.1 -> 0.2.0_rc.1).
+          VERSION: ${{ needs.meta.outputs.version }}
+          VERSION_ARCH: ${{ needs.meta.outputs.version_arch }}
+          URL: ${{ needs.meta.outputs.url }}
+          MAINTAINER: ${{ needs.meta.outputs.maintainer }}
+        run: |
+          set -euo pipefail
+          prefix="verterm-${VERSION}-x86_64-linux"
+          work=/tmp/makepkg
+          mkdir -p "$work" dist
+          cp "payload/${prefix}.tar.gz" "$work/"
+
+          sha="$(sha256sum "$work/${prefix}.tar.gz" | cut -d' ' -f1)"
+          sed -e "s|@VERSION@|$VERSION_ARCH|g" \
+              -e "s|@SRCVER@|$VERSION|g" \
+              -e "s|@URL@|$URL|g" \
+              -e "s|@MAINTAINER@|$MAINTAINER|g" \
+              -e "s|@SHA256@|$sha|g" \
+              packaging/arch/PKGBUILD.in > "$work/PKGBUILD"
+
+          # makepkg refuses to run as root, by design.
+          useradd -m builder
+          chown -R builder:builder "$work"
+          su builder -s /bin/bash -c \
+            "cd '$work' && PACKAGER='$MAINTAINER' makepkg -f --noconfirm --nodeps"
+
+          cp "$work"/*.pkg.tar.zst dist/
+          for f in dist/*.pkg.tar.zst; do
+            echo "== $f"
+            pacman -Qip "$f"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-arch
+          path: dist/*.pkg.tar.zst
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  appimage:
+    name: Package .AppImage
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    # Same bookworm base as the build: the AppDir must not pick up anything newer
+    # than the binary's own glibc floor.
+    container:
+      image: debian:bookworm
+    steps:
+      - name: Install packaging tools
+        run: |
+          set -eux
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git file desktop-file-utils
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: payload
+          path: payload
+
+      - name: appimagetool
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          # No FUSE in a container; the runtime unpacks itself to a temp dir instead.
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+          ARCH: x86_64
+        run: |
+          set -euo pipefail
+          prefix="verterm-${VERSION}-x86_64-linux"
+          tar -xzf "payload/${prefix}.tar.gz"
+
+          AppDir=AppDir
+          mkdir -p "$AppDir/usr"
+          cp -a "$prefix/bin" "$prefix/share" "$AppDir/usr/"
+
+          install -m755 packaging/appimage/AppRun "$AppDir/AppRun"
+          # appimagetool wants the desktop entry and the icon at the AppDir root, and
+          # uses .DirIcon as the thumbnail shown by file managers.
+          cp "$AppDir/usr/share/applications/verterm.desktop" "$AppDir/verterm.desktop"
+          cp "$AppDir/usr/share/icons/hicolor/scalable/apps/verterm.svg" "$AppDir/verterm.svg"
+          ln -s verterm.svg "$AppDir/.DirIcon"
+
+          desktop-file-validate "$AppDir/verterm.desktop"
+
+          # The tool moved repositories; try its current home first, then the old one.
+          for u in \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage \
+            https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          do
+            if curl -fsSL -o appimagetool "$u"; then echo "got appimagetool from $u"; break; fi
+          done
+          [[ -s appimagetool ]] || { echo "::error::could not download appimagetool"; exit 1; }
+          chmod +x appimagetool
+
+          mkdir -p dist
+          ./appimagetool "$AppDir" "dist/verterm-${VERSION}-x86_64.AppImage"
+
+          # An AppImage that cannot even print its version is not worth shipping. This
+          # runs the payload binary through the real runtime; --version is the only
+          # code path that does not need a display server.
+          chmod +x "dist/verterm-${VERSION}-x86_64.AppImage"
+          out="$(./dist/verterm-${VERSION}-x86_64.AppImage --version)"
+          echo "$out"
+          grep -qF "$VERSION" <<<"$out" || {
+            echo "::error::AppImage --version printed '$out'"
+            exit 1
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-appimage
+          path: dist/*.AppImage
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish release
+    needs: [meta, gate, build, deb, rpm, arch, appimage]
+    if: needs.meta.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+          {
+            echo "### Artifacts"
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: gh release create
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          VERSION_PKG: ${{ needs.meta.outputs.version_pkg }}
+          VERSION_ARCH: ${{ needs.meta.outputs.version_arch }}
+          GLIBC: ${{ needs.build.outputs.glibc }}
+          PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          notes="$(mktemp)"
+          cat > "$notes" <<EOF
+          ## Install
+
+          | | |
+          |---|---|
+          | Debian / Ubuntu | \`sudo apt install ./verterm_${VERSION_PKG}-1_amd64.deb\` |
+          | Fedora / openSUSE | \`sudo dnf install ./verterm-${VERSION_PKG}-1.x86_64.rpm\` |
+          | Arch | \`sudo pacman -U verterm-${VERSION_ARCH}-1-x86_64.pkg.tar.zst\` |
+          | AppImage | \`chmod +x verterm-${VERSION}-x86_64.AppImage && ./verterm-${VERSION}-x86_64.AppImage\` |
+          | Any distro, no root | \`tar -xzf verterm-${VERSION}-x86_64-linux.tar.gz -C ~/.local --strip-components=1\` |
+
+          All artifacts are the same x86_64 build, produced once inside \`debian:bookworm\`.
+          It needs **glibc ${GLIBC}+** and **OpenSSL 3**, a Wayland or X11 session, and a
+          Vulkan driver (libEGL is the fallback). Verify with \`sha256sum -c SHA256SUMS\`.
+          EOF
+
+          args=(--title "verterm $VERSION" --notes-file "$notes" --generate-notes --verify-tag)
+          # `if` rather than `[[ ... ]] && args+=(...)`: under `set -e` a false && list
+          # is fatal when it is the last statement, so the one-liner form only works by
+          # virtue of what happens to follow it.
+          if [[ "$PRERELEASE" == "true" ]]; then args+=(--prerelease); fi
+
+          gh release create "$TAG" "${args[@]}" dist/*

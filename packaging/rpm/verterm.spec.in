@@ -1,0 +1,86 @@
+# Binary-only spec: the payload tarball produced by packaging/build-payload.sh is
+# already a compiled, stripped x86_64 build, so there is nothing to compile here
+# and no debuginfo left to split out.
+%global debug_package %{nil}
+# Skip the brp-* install scripts. They exist to strip, mangle shebangs and generate
+# build-ids for freshly compiled trees; none of that applies to a prebuilt binary,
+# and running them only introduces distro-version-dependent differences.
+%global __os_install_post %{nil}
+# No %%{?dist} tag: this binary is glibc-baseline-portable rather than built for one
+# Fedora release, so pinning it to the container's release would be misleading.
+%global _build_id_links none
+
+# The payload tarball keeps the semver name from the tag (0.2.0-rc.1); Version below
+# is the same string with the hyphen turned into `~`, which is what RPM allows and
+# what sorts a pre-release *below* the final release.
+%global srcver   @SRCVER@
+
+Name:           verterm
+Version:        @VERSION@
+Release:        1
+Summary:        GPU-accelerated, keyboard-centric terminal emulator
+
+License:        MIT
+URL:            @URL@
+Source0:        verterm-%{srcver}-x86_64-linux.tar.gz
+ExclusiveArch:  x86_64
+
+# Hard-linked dependencies (glibc, libgcc, OpenSSL 3) are picked up automatically by
+# rpm's find-requires from the binary's DT_NEEDED entries. Everything below is
+# dlopen'ed at runtime and therefore invisible to that: libxkbcommon for keyboard
+# handling, the Wayland client libraries for the primary backend, and the Vulkan
+# loader or libEGL for the wgpu renderer. fontconfig supplies fc-match, which resolves
+# the configured font families -- without it verterm falls back to egui's built-in faces.
+Recommends:     libxkbcommon
+Recommends:     libwayland-client
+Recommends:     libwayland-egl
+Recommends:     vulkan-loader
+Recommends:     libglvnd-egl
+Recommends:     fontconfig
+
+# The X11 fallback backend, and the optional integrations: git for branch badges,
+# xdg-utils for opening URLs from fast-jump hints.
+Suggests:       libxkbcommon-x11
+Suggests:       libX11
+Suggests:       libxcb
+Suggests:       libXcursor
+Suggests:       libXi
+Suggests:       git-core
+Suggests:       xdg-utils
+
+%description
+verterm is a Wayland-first terminal emulator written in Rust on alacritty_terminal
+and egui/wgpu, built around a vertical tab tree instead of a horizontal tab bar.
+
+A /proc scanner classifies every session as a local project, an SSH host, a container
+or a root shell, and keeps per-tab job health live: running or finished, exit code,
+CPU and RSS footprint, git branch. Desktop notifications fire over D-Bus when a long
+command finishes while its tab or the window is unfocused. Scrollback has a vi mode
+with search and yank, fast-jump hints for URLs, paths and hashes, and a session search
+that looks through both tab identity and what each tab has printed. A summon-only
+Ollama integration drafts shell commands; nothing it produces reaches a shell without
+an explicit keystroke.
+
+%prep
+%autosetup -n verterm-%{srcver}-x86_64-linux
+
+%install
+mkdir -p %{buildroot}%{_prefix}
+cp -a bin share %{buildroot}%{_prefix}/
+
+%check
+# The payload has to be the architecture this package claims, and has to be the
+# version in the tag -- a mismatch here means the wrong artifact was downloaded.
+test -x %{buildroot}%{_bindir}/verterm
+file %{buildroot}%{_bindir}/verterm | grep -q 'ELF 64-bit LSB .*x86-64'
+
+%files
+%{_bindir}/verterm
+%{_datadir}/applications/verterm.desktop
+%{_datadir}/icons/hicolor/scalable/apps/verterm.svg
+%{_datadir}/metainfo/*.metainfo.xml
+%doc %{_datadir}/doc/verterm/
+
+%changelog
+* @RPMDATE@ @MAINTAINER@ - @VERSION@-1
+- Release @VERSION@. See @URL@/releases/tag/v@VERSION@ for the changes.

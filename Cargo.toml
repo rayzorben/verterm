@@ -1,0 +1,66 @@
+[package]
+name = "verterm"
+version = "0.2.0"
+edition = "2024"
+description = "GPU-accelerated, keyboard-centric Linux terminal with a vertical tab tree, /proc-driven session classification, and summon-only local AI"
+license = "MIT"
+
+[dependencies]
+# Terminal parsing & grid engine
+alacritty_terminal = "0.26"
+portable-pty = "0.9"
+
+# Systems & process inspection
+nix = { version = "0.31", features = ["process", "signal", "term", "fs", "poll"] }
+procfs = { version = "0.18", default-features = false }
+libc = "0.2"
+
+# Desktop notifications (session D-Bus via pure-Rust zbus)
+notify-rust = "4.18"
+
+# Async runtime & networking for Ollama
+tokio = { version = "1.53", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "io-util", "process"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "native-tls", "http2", "charset"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "1"
+
+# Clipboard reads: egui 0.36 can only *write* (ctx.copy_text), and the paste path relies on
+# egui-winit turning Ctrl+Shift+V into an Event::Paste. A context-menu "Paste" has no such
+# event, so read the selection directly. Already in the tree via egui-winit; text only.
+arboard = { version = "3.6", default-features = false }
+
+# UI / windowing (Wayland-first, wgpu/Vulkan backend, X11 fallback)
+egui = "0.36"
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "wayland", "x11", "default_fonts"] }
+
+# Utilities
+parking_lot = "0.12"
+anyhow = "1.0"
+directories = "6"
+regex = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Renamed: crate is `notify`, but that collides with our own `notify` module
+# (desktop notifications) and with `notify-rust`'s naming.
+fs_watch = { version = "8", package = "notify" }
+
+# eframe 0.36.1 with upstream PR #8398 backported (vendor/eframe-0.36.1-pr8398.patch): without it
+# eframe leaves winit in ControlFlow::Poll while waiting for a Wayland frame callback, so a hidden
+# window (Niri workspace not shown) spins the GUI thread at 100% CPU. See vendor/README.md.
+# Drop this section and vendor/ once eframe >= 0.37 is released (todo/90-eframe-037-drop-vendored-patch.md).
+[patch.crates-io]
+eframe = { path = "vendor/eframe-0.36.1" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+debug = 1
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

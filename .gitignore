@@ -1,0 +1,111 @@
+# Build output.
+#
+# Unanchored, not `/target`: the root one is normally somewhere else entirely
+# (`.cargo/config.toml` points target-dir at ~/.cache/cargo-targets/verterm, to
+# keep multi-gigabyte artifacts out of a Dropbox-synced tree), but it comes back
+# in a fresh clone that has no such config, and `vendor/eframe-0.36.1/target/`
+# appears the first time anyone runs cargo from inside the vendored crate. The
+# anchored form matched neither.
+target/
+
+# rustfmt's backup file and the debug symbols a build can drop beside a binary.
+**/*.rs.bk
+*.pdb
+
+# direnv's materialised environment.
+.direnv/
+
+# Profiling output. `perf record` and cargo-flamegraph both write into the
+# current directory, which is this one when profiling the GUI thread's spin --
+# the reason `vendor/` exists at all (see vendor/README.md).
+perf.data
+perf.data.old
+flamegraph.svg
+
+# Logs, and what a headless smoke run leaves behind.
+#
+# `headless-ui.sh` keeps its state under $VT_STATE_DIR, /tmp/verterm-headless by
+# default, so normally none of this is here -- but that variable can just as
+# easily point into the checkout, which is why these are matched by name
+# anywhere rather than at one path. `verterm.log` and `xvfb.log` are the two it
+# writes; `shots/` is where every screenshot lands.
+*.log
+shots/
+
+# A config written next to the example while testing. `verterm
+# --print-default-config` is meant to be redirected into
+# ~/.config/verterm/config.toml, and the tracked template it prints is
+# `config.example.toml`, sitting right here -- one redirect away from an
+# untracked near-duplicate of it.
+#
+# Anchored: `.cargo/config.toml` is tracked on purpose and must not match.
+/config.toml
+
+# Prose is kept locally, not in the repository. CLAUDE.md, init.md and
+# everything under todo/ are working notes that change on almost every session;
+# tracking them meant every commit carried a diff of the notes taken while
+# making it. They still exist on disk -- `git rm --cached` took them out of the
+# index and left the files alone.
+#
+# `*.MD` is here because the case matters on Linux and does not on the machines
+# these files came from.
+*.md
+*.MD
+
+# The todo queue is prose plus pasted screenshots, all of it local -- the
+# working-notes rule above, applied to the one directory that exists to hold
+# them. The `*.md` pattern already caught the words; the assets beside them (a
+# screenshot named after its todo, an archived RUST_LOG transcript) escaped the
+# screenshot patterns below one filename at a time. `docs/` is the same rule
+# ahead of the fact.
+todo/
+docs/
+
+# Claude Code's own working tree: the skills and tools it writes for itself.
+# `settings.local.json` under it holds machine-specific permissions, `vt-xdo` is
+# a compiled binary, and the rest is a cache of this machine's assistant
+# configuration, not of the project.
+.claude/
+
+# The exceptions to the prose rule, and they are deliberate.
+#
+# The root README is the front page of the repository. Only the root one --
+# `/README.md`, anchored.
+!/README.md
+
+# `vendor/README.md` is the only record of why eframe 0.36.1 is vendored (PR
+# #8398: without it a hidden Wayland window spins a core), what the patch
+# beside it contains, and how to drop the whole directory once 0.37 ships.
+# `git add vendor/` would otherwise take 37 files of somebody else's crate and
+# leave the explanation behind. Its own README.md is upstream's, and is
+# un-ignored for the same reason the rest of that tree is committed: the
+# vendored copy has to be a faithful one for `[patch.crates-io]` to be
+# reproducible.
+#
+# Version-independent on purpose. Naming `eframe-0.36.1` here worked only until the
+# crate was re-vendored: `vendor/eframe-0.37.0/README.md` matched `*.md` and nothing
+# else, so the next bump would have silently dropped it and left the vendored tree
+# unfaithful with no diff to notice. `**` matches zero directories too, so this one
+# line covers `vendor/README.md` as well.
+!/vendor/**/*.md
+
+# Screenshots dropped in the tree while looking at something. `image*.png`
+# rather than `image-*.png`: the first one a paste produces is `image.png`, with
+# no number, and the hyphenated form is exactly the pattern that misses it.
+# `screenshot.png` is what a Niri screenshot arrives as.
+image*.png
+
+# Editor and desktop leavings.
+.vscode/
+.idea/
+*.swp
+*~
+
+# This checkout lives inside Dropbox. A sync from another machine drops
+# `.DS_Store` files into it, and any two-sided edit leaves a second copy of the
+# file named `<name> (Raymond's conflicted copy 2026-09-05).<ext>` -- which
+# `git add -A` would happily commit next to the original.
+.DS_Store
+.dropbox
+.dropbox.attr
+*conflicted copy*

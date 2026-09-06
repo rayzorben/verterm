@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <title>verterm</title>
+  <!--
+    verterm's own layout, drawn as the mark: a window split into a vertical tab rail and a
+    terminal pane. Built on a 128 unit grid with an 8 unit safe margin so it still reads at
+    16 px, where the rail's three stacked tabs have to survive as three distinct strokes.
+
+    Two colours only: `fg` for the frame and the prompt, `accent` (vermilion, the same hue the
+    UI uses for the active marker) for the one tab that is active. That single warm mark is
+    what makes the icon identifiable in a tray of monochrome terminal icons.
+  -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#22262b"/>
+      <stop offset="1" stop-color="#15181c"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="4" y="4" width="120" height="120" rx="26" fill="url(#bg)"/>
+  <rect x="4.5" y="4.5" width="119" height="119" rx="25.5" fill="none"
+        stroke="#ffffff" stroke-opacity="0.10" stroke-width="1"/>
+
+  <g fill="none" stroke="#e6e9ef" stroke-width="4"
+     stroke-linecap="round" stroke-linejoin="round">
+    <!-- The window, and the rail divider that makes it *this* terminal. -->
+    <rect x="24" y="28" width="80" height="72" rx="8"/>
+    <line x1="48" y1="28" x2="48" y2="100"/>
+  </g>
+
+  <!-- Three tabs in the rail; the top one is active and carries the accent marker. -->
+  <g stroke-linecap="round" stroke-width="4">
+    <line x1="33" y1="42" x2="40" y2="42" stroke="#ff5c3d"/>
+    <line x1="33" y1="58" x2="40" y2="58" stroke="#e6e9ef" stroke-opacity="0.45"/>
+    <line x1="33" y1="74" x2="40" y2="74" stroke="#e6e9ef" stroke-opacity="0.45"/>
+  </g>
+
+  <!-- The prompt: chevron plus caret, the universal "this is a shell" mark. -->
+  <g fill="none" stroke="#e6e9ef" stroke-width="4.5"
+     stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="60,52 70,62 60,72"/>
+    <line x1="78" y1="72" x2="92" y2="72"/>
+  </g>
+</svg>

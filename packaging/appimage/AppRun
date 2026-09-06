@@ -1,0 +1,21 @@
+#!/bin/sh
+# AppRun for verterm.
+#
+# Deliberately minimal. A terminal emulator hands its environment to every command
+# the user then runs, so anything exported here leaks into every shell inside every
+# tab -- and the AppImage mount point changes on each launch, so those values would
+# be stale paths pointing at a torn-down mount. Nothing is bundled that needs
+# LD_LIBRARY_PATH either: the binary links only glibc, libgcc and OpenSSL 3, and the
+# Wayland/X11/xkbcommon/Vulkan libraries are dlopen'ed from the host on purpose, so
+# that the host's own GPU drivers are the ones that get loaded.
+#
+# ARGV0 is the exception worth removing rather than merely not setting: the AppImage
+# runtime exports it, and zsh treats it as the name to run as, which breaks shells
+# spawned inside the terminal. APPDIR/OWD/APPIMAGE are unset for the staleness reason
+# above -- HERE is already resolved by then.
+set -eu
+
+HERE="$(dirname "$(readlink -f "$0")")"
+unset ARGV0 APPDIR OWD APPIMAGE APPIMAGE_EXTRACT_AND_RUN
+
+exec "$HERE/usr/bin/verterm" "$@"

@@ -1,0 +1,4 @@
+# Keep build artifacts out of the Dropbox-synced tree. (cargo does not expand $USER, so the
+# path must be literal; CARGO_TARGET_DIR in the environment overrides this.)
+[build]
+target-dir = "/home/rayben/.cache/cargo-targets/verterm"

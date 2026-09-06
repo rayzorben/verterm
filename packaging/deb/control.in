@@ -1,0 +1,35 @@
+Package: verterm
+Version: @VERSION@-1
+Architecture: amd64
+Maintainer: @MAINTAINER@
+Homepage: @URL@
+Section: utils
+Priority: optional
+Installed-Size: @INSTALLED_SIZE@
+Depends: libc6 (>= @GLIBC@), libgcc-s1, libssl3 | libssl3t64
+Recommends: libxkbcommon0, libwayland-client0, libwayland-egl1, libvulkan1, libegl1, fontconfig
+Suggests: libxkbcommon-x11-0, libx11-6, libxcb1, libxcursor1, libxi6, git, xdg-utils, mako-notifier | dunst | sway-notification-center | notification-daemon
+Description: GPU-accelerated, keyboard-centric terminal emulator
+ verterm is a Wayland-first terminal emulator written in Rust on
+ alacritty_terminal and egui/wgpu, built around a vertical tab tree instead of
+ a horizontal tab bar.
+ .
+ A /proc scanner classifies every session as a local project, an SSH host, a
+ container or a root shell, and keeps per-tab job health live: running or
+ finished, exit code, CPU and RSS footprint, git branch. Desktop notifications
+ fire over D-Bus when a long command finishes while its tab or the window is
+ unfocused. Scrollback has a vi mode with search and yank, fast-jump hints for
+ URLs, paths and hashes, and a session search that looks through both tab
+ identity and what each tab has printed. A summon-only Ollama integration
+ drafts shell commands; nothing it produces reaches a shell without an
+ explicit keystroke.
+ .
+ The Recommends are dlopen'ed at runtime rather than linked, so they do not
+ show up in the automatic shared-library dependencies: libxkbcommon for
+ keyboard handling on both backends, the Wayland client libraries for the
+ primary backend, and the Vulkan loader or libEGL for the wgpu renderer.
+ fontconfig supplies fc-match, which resolves the configured font families;
+ without it verterm falls back to egui's built-in faces. The Suggests are the
+ X11 fallback backend and the optional integrations: git for branch badges,
+ xdg-utils for opening URLs from fast-jump hints, and a notification daemon
+ for desktop alerts.
