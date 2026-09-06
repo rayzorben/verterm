@@ -22,6 +22,12 @@ const ICON: f32 = 12.0;
 /// is clamped to the small font's line box so the gauge never outgrows the row it sits on.
 const GAUGE_W: f32 = 40.0;
 const GAUGE_H: f32 = 13.0;
+/// The narrowest git chip still worth drawing, as a multiple of the micro font size. Below
+/// roughly five characters it is noise rather than information, and the row's tooltip carries
+/// the branch in full either way.
+const GIT_MIN_EMS: f32 = 3.5;
+/// Width the subtitle text keeps for itself whatever else wants the row.
+const SUB_FLOOR: f32 = 70.0;
 /// Padding above and below the text block inside a tab card.
 const CARD_PAD_Y: f32 = 6.0;
 /// Space between a tab's title and its subtitle.
@@ -407,6 +413,10 @@ pub fn show(
                         // A bare right-click used to close the tab outright — one stray click
                         // killed a session. It opens a menu instead; Close is now deliberate.
                         let id = tab.id;
+                        // The card can only ever show a fitted branch, a packed subset of the
+                        // chips and an elided path; hovering is the way back to what they
+                        // actually are.
+                        let resp = resp.on_hover_text(tab_tooltip(tab));
                         resp.context_menu(|ui| {
                             if ui.button("Activate").clicked() {
                                 out.activate = Some(id);
@@ -472,6 +482,19 @@ pub fn show(
             });
         });
     out
+}
+
+/// Everything the card would say if it had the width: the row's identity, unabbreviated.
+fn tab_tooltip(tab: &TabRow) -> String {
+    let mut lines = vec![tab.title.clone()];
+    if let Some(sub) = &tab.subtitle {
+        lines.push(sub.clone());
+    }
+    lines.extend(tab.badges.iter().map(|b| b.text.clone()));
+    if let Some(git) = &tab.git {
+        lines.push(format!("git {}", git.text));
+    }
+    lines.join("\n")
 }
 
 fn draw_tab(
@@ -598,14 +621,39 @@ fn draw_tab(
     if let (Some(sub), Some(sub_cy)) = (&tab.subtitle, geom.sub_cy) {
         let sub_y = card.top() + sub_cy;
         let mut sub_right = card.right() - 8.0;
+        let sub_floor = text_x + SUB_FLOOR;
         // Right to left: git branch, then the CPU gauge, then the remaining identity chips,
         // leaving `name · memory` the space that is left. Reading order along the row is
         // therefore name → memory → cpu → branch.
         if let Some(git) = &tab.git {
-            let chip = Chip::new(p, &git.text, &ty.micro, git.color);
-            sub_right -= chip.width();
-            chip.paint(p, sub_right, sub_y);
-            sub_right -= 6.0;
+            // Drawn first, budgeted last: the branch is pinned rightmost but it is the
+            // lowest-priority claimant on this line — the others say what the session is
+            // doing *now*, the branch only says where it is — so it gets what the gauge, the
+            // identity chips and the subtitle's own floor leave behind, and no more. An
+            // unbudgeted `Chip::new` here ran a long `feature/…` name off the card and clean
+            // out of the rail.
+            let mut reserved = if tab.load.is_some() {
+                GAUGE_W + 6.0
+            } else {
+                0.0
+            };
+            reserved += identity.iter().map(|c| c.width() + 6.0).sum::<f32>();
+            let budget = sub_right - reserved - sub_floor;
+            // A branch that fits is always shown; the noise floor only gates the ones that
+            // have to be cut, because *those* are what stop being worth the pixels.
+            let natural = Chip::new(p, &git.text, &ty.micro, git.color);
+            let chip = if natural.width() <= budget {
+                Some(natural)
+            } else if budget >= ty.micro.size * GIT_MIN_EMS {
+                Some(Chip::branch(p, &git.text, &ty.micro, git.color, budget))
+            } else {
+                None
+            };
+            if let Some(chip) = chip {
+                sub_right -= chip.width();
+                chip.paint(p, sub_right, sub_y);
+                sub_right -= 6.0;
+            }
         }
         if let Some((load, reading)) = &tab.load {
             let w = GAUGE_W;
@@ -629,7 +677,7 @@ fn draw_tab(
             );
             sub_right -= w + 6.0;
         }
-        sub_right = pack(p, &identity, sub_right, sub_y, text_x + 70.0);
+        sub_right = pack(p, &identity, sub_right, sub_y, sub_floor);
         chrome::line(
             p,
             text_x,

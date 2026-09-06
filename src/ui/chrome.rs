@@ -118,6 +118,36 @@ impl Chip {
         }
     }
 
+    /// Tinted like `new`, but laid out inside `max_width` with a trailing ellipsis. The floor
+    /// under any caller packing chips into a space it does not control.
+    pub fn elided(p: &Painter, text: &str, font: &FontId, color: Color32, max_width: f32) -> Self {
+        Self {
+            galley: elide(
+                p,
+                text,
+                font,
+                color,
+                (max_width - CHIP_PAD_X * 2.0).max(0.0),
+            ),
+            fg: color,
+            bg: Some(tint(color, 34)),
+        }
+    }
+
+    /// A git branch fitted into `max_width`: shortened *semantically* first — namespace
+    /// collapsed, middle of the leaf dropped — and only elided once nothing else is left to
+    /// give. Plain elision would spend the whole budget on `feature/` and cut away the words
+    /// that say which feature.
+    pub fn branch(p: &Painter, name: &str, font: &FontId, color: Color32, max_width: f32) -> Self {
+        let inner = (max_width - CHIP_PAD_X * 2.0).max(0.0);
+        let fitted = shorten_branch(name, inner, |s| {
+            p.layout_no_wrap(s.to_string(), font.clone(), color)
+                .size()
+                .x
+        });
+        Self::elided(p, &fitted, font, color, max_width)
+    }
+
     pub fn width(&self) -> f32 {
         self.galley.size().x
             + if self.bg.is_some() {
@@ -459,9 +489,185 @@ pub fn line(
     p.galley(pos2(left, cy - g.size().y / 2.0), g, color);
 }
 
+/// The characters branch names are built from, in every convention that matters here:
+/// `fix-null-deref`, `rb_loc_ct_watermark`, `release.2.1`.
+const WORD_SEPS: [char; 3] = ['-', '_', '.'];
+
+/// Split on separator runs, each word keeping the separators that follow it, so the pieces
+/// can be re-joined without inventing or losing punctuation.
+fn word_tokens(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut in_sep = false;
+    for (i, c) in s.char_indices() {
+        let is_sep = WORD_SEPS.contains(&c);
+        if in_sep && !is_sep {
+            out.push(&s[start..i]);
+            start = i;
+        }
+        in_sep = is_sep;
+    }
+    if start < s.len() {
+        out.push(&s[start..]);
+    }
+    out
+}
+
+/// Fit a git branch name into `max_width`, measured by `width_of`, keeping the parts that say
+/// *which* branch it is. The ladder, each rung tried only because the one above it overflowed:
+///
+/// 1. the name as it stands;
+/// 2. the namespace collapsed to a single-letter cue — `feature/`, `bugfix/`, `users/rayben/`
+///    are a taxonomy repeated across every tab, not an identity, so they are the cheapest
+///    characters in the string to give up;
+/// 3. the middle of the leaf dropped, on word boundaries and from the inside out — the head
+///    names the area and the tail names the specific thing, so the filler between them goes
+///    first, and keeping the tail is what leaves sibling branches distinguishable.
+///
+/// Below that there is nothing semantic left to trim: the collapsed form is returned and the
+/// caller elides it. The full name is never *lost* — it stays in the row's tooltip, in the
+/// status bar for the active tab, and in the session-find index.
+pub fn shorten_branch(name: &str, max_width: f32, width_of: impl Fn(&str) -> f32) -> String {
+    let fits = |s: &str| width_of(s) <= max_width;
+    if fits(name) {
+        return name.to_string();
+    }
+
+    let (prefix, leaf) = match name.rfind('/') {
+        Some(i) => match name.chars().next() {
+            Some(initial) => (format!("{initial}/"), &name[i + 1..]),
+            None => (String::new(), name),
+        },
+        None => (String::new(), name),
+    };
+    let collapsed = format!("{prefix}{leaf}");
+    if fits(&collapsed) {
+        return collapsed;
+    }
+
+    // Grow outwards from the ellipsis, head first, and take the widest pair that still fits.
+    let words = word_tokens(leaf);
+    for keep in (2..words.len()).rev() {
+        let head_n = keep.div_ceil(2);
+        let head: String = words[..head_n].concat();
+        let tail: String = words[words.len() - (keep - head_n)..].concat();
+        let cand = format!(
+            "{prefix}{}…{tail}",
+            head.trim_end_matches(|c| WORD_SEPS.contains(&c))
+        );
+        if fits(&cand) {
+            return cand;
+        }
+    }
+    collapsed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A measurer of one width per character, so the branch tests read in characters.
+    fn per_char(px: f32) -> impl Fn(&str) -> f32 {
+        move |s: &str| s.chars().count() as f32 * px
+    }
+
+    /// `rb_loc_ct_watermark_merge_guard` — 31 chars, six words, under an 8-char namespace.
+    const LONG: &str = "feature/rb_loc_ct_watermark_merge_guard";
+
+    #[test]
+    fn word_tokens_lose_nothing() {
+        for s in [
+            "rb_loc_ct_watermark_merge_guard",
+            "fix-null-deref",
+            "release.2.1",
+            "single",
+            "mixed_sep-run.here",
+            "trailing_",
+        ] {
+            assert_eq!(word_tokens(s).concat(), s, "round trip of {s}");
+        }
+    }
+
+    #[test]
+    fn a_branch_that_fits_is_left_alone() {
+        assert_eq!(shorten_branch("main", 1000.0, per_char(6.0)), "main");
+        assert_eq!(
+            shorten_branch("feature/small", 1000.0, per_char(6.0)),
+            "feature/small"
+        );
+    }
+
+    /// The namespace is the cheapest thing in the string to give up, so it goes before any
+    /// part of the leaf is cut.
+    #[test]
+    fn the_namespace_collapses_before_the_leaf_is_cut() {
+        assert_eq!(
+            shorten_branch(LONG, 33.0 * 6.0, per_char(6.0)),
+            "f/rb_loc_ct_watermark_merge_guard"
+        );
+        assert_eq!(
+            shorten_branch("users/rayben/fix-the-thing", 15.0 * 6.0, per_char(6.0)),
+            "u/fix-the-thing"
+        );
+    }
+
+    /// Both ends of a leaf carry signal; the filler between them is what goes, on word
+    /// boundaries rather than mid-word.
+    #[test]
+    fn the_middle_goes_before_either_end() {
+        assert_eq!(
+            shorten_branch(LONG, 20.0 * 6.0, per_char(6.0)),
+            "f/rb_loc…merge_guard"
+        );
+        assert_eq!(
+            shorten_branch(LONG, 12.0 * 6.0, per_char(6.0)),
+            "f/rb…guard"
+        );
+    }
+
+    /// Tail elision would keep `feature/rb_loc…` and throw away the words that say what the
+    /// branch does; every semantic rung keeps the last word instead.
+    #[test]
+    fn the_tail_survives_every_semantic_rung() {
+        for chars in 10..=38 {
+            let got = shorten_branch(LONG, chars as f32 * 6.0, per_char(6.0));
+            assert!(
+                got.ends_with("guard"),
+                "at {chars} chars the tail was lost: {got}"
+            );
+        }
+    }
+
+    /// Below the tightest pair there is nothing semantic left to trim, so the collapsed form
+    /// comes back for the caller's elider to cut.
+    #[test]
+    fn too_narrow_falls_back_to_the_collapsed_form() {
+        assert_eq!(
+            shorten_branch(LONG, 5.0 * 6.0, per_char(6.0)),
+            "f/rb_loc_ct_watermark_merge_guard"
+        );
+    }
+
+    /// One word has no middle to drop; elision is the only move and it belongs to the caller.
+    #[test]
+    fn a_single_word_branch_is_left_for_the_elider() {
+        let name = "verylongsinglewordbranchname";
+        assert_eq!(shorten_branch(name, 6.0 * 6.0, per_char(6.0)), name);
+    }
+
+    #[test]
+    fn multi_byte_names_are_cut_on_char_boundaries() {
+        let got = shorten_branch("ünicode/á_b_c_d_e_f", 8.0 * 6.0, per_char(6.0));
+        assert_eq!(got, "ü/á_b…f");
+    }
+
+    #[test]
+    fn a_zero_budget_never_panics() {
+        assert_eq!(
+            shorten_branch(LONG, 0.0, per_char(6.0)),
+            "f/rb_loc_ct_watermark_merge_guard"
+        );
+    }
 
     #[test]
     fn shadow_is_soft_and_downward() {
