@@ -202,11 +202,13 @@ fn dispatch(
                 .urgency(urgency)
                 .timeout(Timeout::Milliseconds(timeout_ms));
             if activate.is_some() {
-                // `default` is the XDG action key for "the body was clicked"; its label is
-                // conventionally ignored, so the explicit button is what the user actually
-                // sees. Offering both means clicking anywhere on the notification works.
-                n.action("default", "Show session")
-                    .action(ACTIVATE_KEY, "Show session");
+                // Exactly one action, keyed `default`. That is the XDG key for "the body was
+                // clicked", so mako/dunst/GNOME activate it without drawing a button; daemons
+                // that ignore the convention and draw every action (quickshell's
+                // DankMaterialShell renders the whole list and invokes `actions[0]` on a body
+                // click) then draw one button labelled "Show session". A second, differently
+                // keyed action would only be a duplicate button on the latter.
+                n.action("default", "Show session");
             }
             let handle = match n.show() {
                 Ok(h) => h,
@@ -220,7 +222,7 @@ fn dispatch(
             // thread ends — it also matches `NotificationClosed`, so nothing is leaked when
             // the notification simply times out.
             handle.wait_for_action(|action| {
-                if action == ACTIVATE_KEY || action == "default" {
+                if action == "default" {
                     let _ = a.tx.send(a.tab);
                     a.ctx.request_repaint();
                 }
@@ -228,9 +230,6 @@ fn dispatch(
         })
         .ok();
 }
-
-/// Action key for the "take me there" button.
-const ACTIVATE_KEY: &str = "verterm-activate";
 
 #[cfg(test)]
 mod tests {
