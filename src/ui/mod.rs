@@ -234,6 +234,19 @@ fn bucket_icon(bucket: Bucket) -> chrome::Icon {
     }
 }
 
+/// The hue a bucket's panel is washed with. It is the same colour the sessions inside it
+/// already wear on their identity chips — gold for an ssh host, blue for a container,
+/// vermilion for root — so the category box and its rows say the same thing.
+fn bucket_tint(bucket: Bucket, c: &UiColors) -> egui::Color32 {
+    match bucket {
+        Bucket::Local => c.accent,
+        Bucket::Remote => c.gold,
+        Bucket::Container => c.blue,
+        Bucket::Elevated => c.vermilion,
+        Bucket::Ephemeral => c.muted,
+    }
+}
+
 /// Menu labels quote the matched text, which can be a 200-char URL; keep the popup narrow.
 fn elide_menu_text(s: &str) -> String {
     const MAX: usize = 32;
@@ -279,6 +292,9 @@ pub struct App {
     last_title: String,
     toasts: Vec<(Instant, String)>,
     config_rx: Option<Receiver<Config>>,
+    /// `--theme <name>`, if it was given. Re-applied on every config reload: the flag is a
+    /// property of this run, so editing config.toml must not silently take the theme back.
+    theme_override: Option<String>,
     /// Pending context-menu paste: (tab, clipboard text) from the reader thread.
     paste_rx: Option<Receiver<(TabId, String)>>,
     /// The question behind the last AI suggestion the user *ran*, so the overlay can offer to
@@ -298,8 +314,9 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, cfg: Config, cli: Cli) -> anyhow::Result<Self> {
         let ctx = cc.egui_ctx.clone();
         let (notify_tx, notify_rx) = mpsc::channel();
-        let palette = Arc::new(Palette::from_config(&cfg.colors));
-        let colors = UiColors::from_palette(&palette, &cfg.colors);
+        let scheme = cfg.colors.resolve();
+        let palette = Arc::new(Palette::from_scheme(&scheme));
+        let colors = UiColors::from_scheme(&scheme);
         ctx.set_visuals(theme::visuals(&colors));
         let term_fonts = fonts::install(&ctx, &cfg.font);
         tracing::info!(font = %term_fonts.description, "terminal font family");
@@ -390,6 +407,7 @@ impl App {
             last_title: String::new(),
             toasts: Vec::new(),
             config_rx,
+            theme_override: cli.theme.clone(),
             paste_rx: None,
         };
         for w in warnings {
@@ -443,9 +461,13 @@ impl App {
     /// the new values. Runtime-only state the user may have adjusted since startup — rail
     /// visibility, zoomed font size, open tabs — is left alone. `general.scan_interval_ms` and
     /// `general.shell_integration` are read only at startup and need a restart to take effect.
-    fn apply_config(&mut self, ctx: &egui::Context, cfg: Config) {
-        self.palette = Arc::new(Palette::from_config(&cfg.colors));
-        self.colors = UiColors::from_palette(&self.palette, &cfg.colors);
+    fn apply_config(&mut self, ctx: &egui::Context, mut cfg: Config) {
+        if let Some(name) = &self.theme_override {
+            cfg.colors.theme = Some(name.clone());
+        }
+        let scheme = cfg.colors.resolve();
+        self.palette = Arc::new(Palette::from_scheme(&scheme));
+        self.colors = UiColors::from_scheme(&scheme);
         ctx.set_visuals(theme::visuals(&self.colors));
 
         if cfg.font.family != self.cfg.font.family || cfg.font.ui_family != self.cfg.font.ui_family
@@ -1841,6 +1863,7 @@ impl App {
                 collapsed: false,
                 count: identity.len(),
                 elevated: false,
+                tint: self.colors.accent,
             });
             for (_, s) in identity {
                 rows.push(mark(self.tab_row(s, index_of(s.id))));
@@ -1854,6 +1877,7 @@ impl App {
                 collapsed: false,
                 count: content.len(),
                 elevated: false,
+                tint: self.colors.gold,
             });
             for (hit, s) in content {
                 let mut row = self.tab_row(s, index_of(s.id));
@@ -1881,6 +1905,7 @@ impl App {
                 collapsed: collapsed_b,
                 count: b.groups.iter().map(|g| g.tabs.len()).sum(),
                 elevated,
+                tint: bucket_tint(b.bucket, &self.colors),
             });
             if collapsed_b {
                 continue;

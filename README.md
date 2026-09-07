@@ -41,6 +41,10 @@ Requires a Wayland (or X11) session with Vulkan drivers, fontconfig (`fc-match`)
   `SSH / REMOTE` (grouped by host), `CONTAINERS` (grouped by container name — `distrobox enter`,
   `docker`/`podman exec`, `toolbox`), `ELEVATED` (sudo/doas/root shells, red perimeter), `AD-HOC` (scratchpads
   that close when their command exits). Groups fold; tabs can be pinned to another group.
+  Each bucket is a bounded, rounded panel with its category capping the top, and every group inside
+  it gets its own hue — a tinted band, a coloured spine down its tabs, and a matching header — so a
+  session is found by aiming at a coloured region instead of reading every row. A group keeps its
+  hue across restarts, and two groups that touch never share one.
 - **Indicators per tab**: `·` idle, `◦/●` amber (pulsing after 3 s) running, `●` green exit 0, `●` red + code
   on failure; badges `[SSH: host]` `[ROOT]` `[GIT: branch*]`; footprint `nvim (42M)` / `make (8 cores, 94%, 1.2G)`.
 - **Notifications** over D-Bus when a command that ran ≥ 3 s finishes while the tab/window is unfocused
@@ -102,8 +106,23 @@ rail opens a new tab.
 | `[font]` | `family` (list, first fontconfig match wins), `ui_family` (proportional face for the chrome), `size`, `line_height` |
 | `[ai]` | `enabled`, `endpoint` (`https://orohost:11434`), `model`, `stream`, `temperature`, `insecure_tls`, `timeout_secs`, `context_lines`, `position` (`bottom-right` \| `bottom-left` \| `top-right` \| `top-left` \| `center` \| `prompt`), `system_prompt` |
 | `[notifications]` | `enabled`, `threshold_secs`, `on_bell`, `timeout_ms` |
-| `[colors]` | `foreground`, `background`, `cursor`, `selection`, `accent` (chrome accent), `normal[8]`, `bright[8]` |
+| `[colors]` | `theme` (built-in scheme, see below), plus optional per-key overrides: `foreground`, `background`, `cursor`, `selection`, `accent` (chrome accent), `normal[8]`, `bright[8]` |
 | `[keys]` | `action = "Chord"` |
+
+### Themes
+`theme = "<name>"` under `[colors]` restyles the **whole client**, not just the grid: the rail's
+surfaces, borders, badges, gauges and per-group bands are all derived from the scheme's sixteen ANSI
+colours, and a light background flips the chrome to a light treatment on its own.
+
+| | |
+|---|---|
+| dark | `verterm-dark` (default), `catppuccin-mocha`, `tokyo-night`, `dracula`, `nord`, `gruvbox-dark`, `one-dark`, `solarized-dark` |
+| light | `catppuccin-latte`, `tokyo-night-day`, `solarized-light`, `gruvbox-light`, `one-light`, `github-light`, `everforest-light` |
+
+`verterm --list-themes` prints them; `verterm --theme <name>` overrides the config for one run. Any
+`[colors]` key you set wins over the theme, so a scheme is a starting point rather than a lock-in —
+and setting `background` alone is enough to take a dark theme light, because the chrome measures
+which it is rather than trusting the name.
 
 The config file is hot-reloaded: saving it applies theme/font-family/keybinding/AI-client changes
 immediately (a toast confirms it). A file watcher reacts right away, with a polling fallback in

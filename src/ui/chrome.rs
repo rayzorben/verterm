@@ -22,13 +22,15 @@ pub const R_WELL: u8 = 7;
 const CHIP_PAD_X: f32 = 6.0;
 const CHIP_PAD_Y: f32 = 2.0;
 
-/// Drop shadow shared by every floating surface.
-pub fn shadow() -> Shadow {
+/// Drop shadow shared by every floating surface. A light scheme takes a much lighter one:
+/// the alpha that reads as a soft lift over a near-black ground reads as a bruise over a
+/// near-white one.
+pub fn shadow(dark: bool) -> Shadow {
     Shadow {
         offset: [0, 8],
         blur: 24,
         spread: 0,
-        color: Color32::from_black_alpha(120),
+        color: Color32::from_black_alpha(if dark { 120 } else { 40 }),
     }
 }
 
@@ -70,7 +72,7 @@ pub fn card_frame(c: &UiColors) -> Frame {
         .stroke(Stroke::new(1.0, c.border_strong))
         .inner_margin(Margin::same(12))
         .corner_radius(CornerRadius::same(R_CARD))
-        .shadow(shadow())
+        .shadow(shadow(c.dark))
 }
 
 /// Frame for an inset well — text inputs and code previews inside a card.
@@ -671,8 +673,10 @@ mod tests {
 
     #[test]
     fn shadow_is_soft_and_downward() {
-        let s = shadow();
+        let s = shadow(true);
         assert_eq!(s.offset, [0, 8]);
         assert!(s.blur > s.spread);
+        // A light scheme cannot carry the dark scheme's alpha without looking bruised.
+        assert!(shadow(false).color.a() < s.color.a());
     }
 }

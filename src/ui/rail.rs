@@ -1,13 +1,24 @@
 //! The vertical tab rail: bucket → group → tab rows drawn as cards with the painter. Rows have
 //! per-kind heights so a tab with a subtitle gets two real text baselines. Pure presentation;
 //! the App builds the rows and applies the output.
+//!
+//! The tree is *nested boxes*, not an indented list: a bucket is a bounded, rounded panel with
+//! its category header capping the top, each group inside it is a band tinted with its own hue
+//! and tied to its tabs by a coloured spine, and the tab cards sit inside that band. The point
+//! is to make "which session do I want" a matter of aiming at a coloured region rather than
+//! reading every row. Because a panel's height is only known after its rows are laid out, each
+//! one reserves a shape slot before its first row (so it paints *under* them) and fills it in
+//! when the span closes — see [`Panel`].
 
 use std::time::Duration;
 
-use egui::{Color32, CornerRadius, Rect, Sense, Stroke, pos2, vec2};
+use egui::{
+    Color32, CornerRadius, Rect, Sense, Shape, Stroke, StrokeKind, epaint::RectShape,
+    layers::ShapeIdx, pos2, vec2,
+};
 
 use super::chrome::{self, Chip, Icon, Typography};
-use super::theme::UiColors;
+use super::theme::{GROUP_TINTS, UiColors, tint};
 use crate::session::TabId;
 
 /// Card inset from the rail edges.
@@ -32,6 +43,27 @@ const SUB_FLOOR: f32 = 70.0;
 const CARD_PAD_Y: f32 = 6.0;
 /// Space between a tab's title and its subtitle.
 const LINE_GAP: f32 = 2.0;
+/// Inset of a group band inside its bucket panel.
+const GROUP_INSET: f32 = 4.0;
+/// Inset of a tab card inside its group band. The left side is wider because the group's
+/// coloured spine runs down it.
+const TAB_INSET_L: f32 = 6.0;
+const TAB_INSET_R: f32 = 3.0;
+/// Width of that spine.
+const SPINE_W: f32 = 2.5;
+/// Corner radius of a bucket panel and of a group band.
+const R_BUCKET: u8 = 10;
+const R_GROUP: u8 = 7;
+
+// The boxes have to actually nest: a bucket panel wide enough for a group band inside it, a
+// band wide enough for a tab card *plus* the spine that ties the two together, and an outer
+// radius larger than the inner one so the smaller box reads as sitting in the bigger one.
+// Tuning any of these by eye is easy; tuning them until the nesting collapses back into a flat
+// list is just as easy, which is why they are checked at compile time rather than by eye.
+const _: () = assert!(GROUP_INSET > 0.0);
+const _: () = assert!(TAB_INSET_L > SPINE_W, "the spine must fit beside the card");
+const _: () = assert!(TAB_INSET_R > 0.0);
+const _: () = assert!(R_BUCKET > R_GROUP, "the outer box reads as the wider one");
 
 #[derive(Clone, Debug)]
 pub enum Indicator {
@@ -93,6 +125,9 @@ pub enum Row {
         collapsed: bool,
         count: usize,
         elevated: bool,
+        /// The category's own hue — it washes the whole panel, so the App picks it from the
+        /// bucket rather than the rail re-deriving it from the key string.
+        tint: Color32,
     },
     Group {
         key: String,
@@ -141,6 +176,127 @@ pub fn indicator_color(ind: &Indicator, colors: &UiColors, time: f64) -> (Color3
         Indicator::Failure(_) => (colors.red, false),
         Indicator::Exited => (colors.faint, false),
     }
+}
+
+/// A container whose height is only known once the rows inside it have been laid out.
+///
+/// egui lays rows out top-down, so a panel behind a span of them cannot be painted when the
+/// span opens — but it also must not be painted *after*, or it would cover its own contents.
+/// The way out is epaint's two-step: reserve a slot in the shape list up front (`Painter::add`
+/// of a `Shape::Noop`, which fixes the paint order) and fill it in when the span closes
+/// (`Painter::set`). Both calls use the same painter so the reserved slot keeps the scroll
+/// area's clip rect.
+struct Panel {
+    slot: ShapeIdx,
+    left: f32,
+    right: f32,
+    top: f32,
+    /// Bottom edge of the last row seen inside this panel.
+    bottom: f32,
+    /// Signed adjustments applied to those two edges when the panel closes. Rows tile without
+    /// gaps, so a panel that used them raw would touch its neighbour above and below and the
+    /// stack would read as one box again; this is where the air between boxes comes from.
+    pad: (f32, f32),
+    style: PanelStyle,
+}
+
+/// How a [`Panel`] is painted. A struct rather than four more parameters because the two call
+/// sites differ only in these, and they read better named at the call.
+#[derive(Clone, Copy)]
+struct PanelStyle {
+    fill: Color32,
+    stroke: Color32,
+    radius: u8,
+    /// Left spine, drawn for groups: it is what ties a group's tab cards to its header.
+    spine: Option<Color32>,
+}
+
+impl Panel {
+    fn open(
+        p: &egui::Painter,
+        rect: Rect,
+        (left, right): (f32, f32),
+        pad: (f32, f32),
+        style: PanelStyle,
+    ) -> Self {
+        Self {
+            slot: p.add(Shape::Noop),
+            left,
+            right,
+            top: rect.top(),
+            bottom: rect.bottom(),
+            pad,
+            style,
+        }
+    }
+
+    /// Top edge as it will be painted — the header cap has to line up with it exactly.
+    fn painted_top(&self) -> f32 {
+        self.top + self.pad.0
+    }
+
+    fn close(self, p: &egui::Painter) {
+        let top = self.painted_top();
+        let rect = Rect::from_min_max(
+            pos2(self.left, top),
+            pos2(self.right, (self.bottom + self.pad.1).max(top)),
+        );
+        let radius = CornerRadius::same(self.style.radius);
+        let mut shapes: Vec<Shape> = vec![
+            RectShape::new(
+                rect,
+                radius,
+                self.style.fill,
+                Stroke::new(1.0, self.style.stroke),
+                StrokeKind::Inside,
+            )
+            .into(),
+        ];
+        if let Some(color) = self.style.spine {
+            // Inset by the stroke so the spine reads as a bar *inside* the band rather than a
+            // thicker left border.
+            let spine = Rect::from_min_max(
+                pos2(rect.left() + 1.0, rect.top() + 3.0),
+                pos2(rect.left() + 1.0 + SPINE_W, rect.bottom() - 3.0),
+            );
+            shapes.push(RectShape::filled(spine, CornerRadius::same(1), color).into());
+        }
+        p.set(self.slot, Shape::Vec(shapes));
+    }
+}
+
+/// FNV-1a over the group key. A hand-rolled hash rather than `DefaultHasher` because the value
+/// has to mean the same thing in the next process: a group that was blue this morning being
+/// green after a restart would defeat the point of colouring it at all.
+fn key_hash(key: &str) -> usize {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in key.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    h as usize
+}
+
+/// Hue index for each group, in the order the groups appear.
+///
+/// Two properties, in this priority order, because they conflict: a group should keep the same
+/// hue across restarts (so the colour becomes part of how you recognise it), *and* two groups
+/// that touch must never share one (so the boxes actually separate). The hash gives the first;
+/// nudging a collision with its predecessor to the next hue gives the second, and only
+/// perturbs the group that would have been ambiguous.
+fn group_tints(keys: &[&str], n: usize) -> Vec<usize> {
+    if n == 0 {
+        return vec![0; keys.len()];
+    }
+    let mut out: Vec<usize> = keys.iter().map(|k| key_hash(k) % n).collect();
+    if n > 1 {
+        for i in 1..out.len() {
+            if out[i] == out[i - 1] {
+                out[i] = (out[i] + 1) % n;
+            }
+        }
+    }
+    out
 }
 
 /// Vertical geometry of a tab card, derived from the real line boxes of the two fonts: the row
@@ -282,10 +438,29 @@ pub fn show(
         );
     }
 
+    // Hues are decided for the whole tree up front so a group's colour depends only on the
+    // groups above it, not on which of them happen to be scrolled into view.
+    let tints = {
+        let keys: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Group { key, .. } => Some(key.as_str()),
+                _ => None,
+            })
+            .collect();
+        group_tints(&keys, GROUP_TINTS)
+    };
+    let mut next_tint = 0usize;
+
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
             ui.add_space(4.0);
+            // The two open panels. A bucket closes when the next bucket starts or the list
+            // ends; a group closes on either of those *or* the next group.
+            let mut bucket: Option<Panel> = None;
+            let mut group: Option<(Panel, Color32)> = None;
+
             for (i, row) in rows.iter().enumerate() {
                 // Buckets open a new section; give them air unless they lead the list.
                 if i > 0 && matches!(row, Row::Bucket { .. }) {
@@ -295,11 +470,35 @@ pub fn show(
                     vec2(ui.available_width(), row_height(row, ty)),
                     Sense::click(),
                 );
+                let bucket_span = (rect.left() + PAD_X, rect.right() - PAD_X);
+                let group_span = (bucket_span.0 + GROUP_INSET, bucket_span.1 - GROUP_INSET);
+
+                // Close whatever this row ends before opening anything, so panels nest rather
+                // than overlap, and so a panel's slot is always reserved before its own rows.
+                match row {
+                    Row::Bucket { .. } => {
+                        if let Some((g, _)) = group.take() {
+                            g.close(ui.painter());
+                        }
+                        if let Some(b) = bucket.take() {
+                            b.close(ui.painter());
+                        }
+                    }
+                    Row::Group { .. } => {
+                        if let Some((g, _)) = group.take() {
+                            g.close(ui.painter());
+                        }
+                    }
+                    Row::Tab(_) => {}
+                }
+                if let Some(b) = bucket.as_mut() {
+                    b.bottom = rect.bottom();
+                }
+                if let Some((g, _)) = group.as_mut() {
+                    g.bottom = rect.bottom();
+                }
+
                 let painter = ui.painter().with_clip_rect(rect);
-                let card = Rect::from_min_max(
-                    pos2(rect.left() + PAD_X, rect.top() + GAP_Y),
-                    pos2(rect.right() - PAD_X, rect.bottom() - GAP_Y),
-                );
                 match row {
                     Row::Bucket {
                         key,
@@ -308,36 +507,81 @@ pub fn show(
                         collapsed,
                         count,
                         elevated,
+                        tint: hue,
                     } => {
-                        let color = if *elevated {
-                            colors.vermilion
+                        let hue = if *elevated { colors.vermilion } else { *hue };
+                        // The panel is reserved on the *unclipped* painter: it will grow past
+                        // this row, so clipping it to the header would cut it off.
+                        bucket = Some(Panel::open(
+                            ui.painter(),
+                            rect,
+                            bucket_span,
+                            (0.0, 3.0),
+                            PanelStyle {
+                                fill: tint(hue, 13),
+                                stroke: tint(hue, 78),
+                                radius: R_BUCKET,
+                                spine: None,
+                            },
+                        ));
+                        let card = Rect::from_min_max(
+                            pos2(bucket_span.0, rect.top()),
+                            pos2(bucket_span.1, rect.bottom()),
+                        );
+                        // The category header caps the panel: a stronger wash of the same hue
+                        // with only its top corners rounded, so it reads as a title bar on the
+                        // box rather than as one more row inside it. Inset by the panel's own
+                        // stroke so it does not paint over the outline.
+                        let cap = Rect::from_min_max(
+                            pos2(card.left() + 1.0, card.top() + 1.0),
+                            pos2(card.right() - 1.0, card.bottom()),
+                        );
+                        let cap_r = if *collapsed {
+                            CornerRadius::same(R_BUCKET - 1)
                         } else {
-                            colors.faint
+                            CornerRadius {
+                                nw: R_BUCKET - 1,
+                                ne: R_BUCKET - 1,
+                                sw: 0,
+                                se: 0,
+                            }
                         };
+                        painter.rect_filled(cap, cap_r, tint(hue, 30));
+                        if !*collapsed {
+                            painter.line_segment(
+                                [
+                                    pos2(cap.left(), cap.bottom() - 0.5),
+                                    pos2(cap.right(), cap.bottom() - 0.5),
+                                ],
+                                Stroke::new(1.0, tint(hue, 58)),
+                            );
+                        }
+                        if resp.hovered() {
+                            painter.rect_filled(cap, cap_r, tint(hue, 18));
+                        }
                         chrome::chevron(
                             &painter,
-                            pos2(card.left() + 5.0, card.center().y),
+                            pos2(card.left() + 11.0, card.center().y),
                             3.5,
                             !*collapsed,
-                            color,
+                            hue,
                         );
                         chrome::icon(
                             &painter,
                             *icon,
-                            pos2(card.left() + 17.0, card.center().y),
+                            pos2(card.left() + 23.0, card.center().y),
                             ICON - 1.0,
-                            color,
+                            hue,
                         );
                         chrome::section_label(
                             &painter,
-                            pos2(card.left() + 28.0, card.center().y),
+                            pos2(card.left() + 34.0, card.center().y),
                             label,
                             &ty.micro,
-                            color,
+                            hue,
                         );
-                        let chip =
-                            Chip::plain(&painter, &count.to_string(), &ty.micro, colors.faint);
-                        chip.paint(&painter, card.right() - chip.width(), card.center().y);
+                        let chip = Chip::plain(&painter, &count.to_string(), &ty.micro, hue);
+                        chip.paint(&painter, card.right() - 9.0 - chip.width(), card.center().y);
                         if resp.clicked() {
                             out.toggle_key = Some(key.clone());
                         }
@@ -350,24 +594,41 @@ pub fn show(
                         count,
                         elevated,
                     } => {
-                        if resp.hovered() {
-                            painter.rect_filled(
-                                card,
-                                CornerRadius::same(chrome::R_ROW),
-                                colors.surface_hi,
-                            );
-                        }
-                        let color = if *elevated {
+                        let hue = if *elevated {
                             colors.vermilion
                         } else {
-                            colors.muted
+                            let t = tints.get(next_tint).copied().unwrap_or(0);
+                            colors.group[t.min(GROUP_TINTS - 1)]
                         };
+                        next_tint += 1;
+                        group = Some((
+                            Panel::open(
+                                ui.painter(),
+                                rect,
+                                group_span,
+                                (2.0, -1.0),
+                                PanelStyle {
+                                    fill: tint(hue, 18),
+                                    stroke: tint(hue, 52),
+                                    radius: R_GROUP,
+                                    spine: Some(tint(hue, 190)),
+                                },
+                            ),
+                            hue,
+                        ));
+                        let card = Rect::from_min_max(
+                            pos2(group_span.0, rect.top() + 2.0),
+                            pos2(group_span.1, rect.bottom()),
+                        );
+                        if resp.hovered() {
+                            painter.rect_filled(card, CornerRadius::same(R_GROUP), tint(hue, 22));
+                        }
                         chrome::chevron(
                             &painter,
-                            pos2(card.left() + 13.0, card.center().y),
+                            pos2(card.left() + 12.0, card.center().y),
                             3.5,
                             !*collapsed,
-                            colors.faint,
+                            hue,
                         );
                         let mut right = card.right() - 6.0;
                         if *collapsed {
@@ -380,11 +641,11 @@ pub fn show(
                         chrome::icon(
                             &painter,
                             *icon,
-                            pos2(card.left() + 26.0, card.center().y),
+                            pos2(card.left() + 24.0, card.center().y),
                             ICON,
-                            color,
+                            hue,
                         );
-                        let x = card.left() + 36.0;
+                        let x = card.left() + 34.0;
                         // A group is a header for the tabs under it, so it reads at the same
                         // size as their titles; `ty.small` made the heading quieter than its
                         // own children and inverted the hierarchy.
@@ -394,7 +655,7 @@ pub fn show(
                             card.center().y,
                             name,
                             &ty.ui,
-                            color,
+                            hue,
                             (right - x).max(0.0),
                         );
                         if resp.clicked() {
@@ -402,6 +663,17 @@ pub fn show(
                         }
                     }
                     Row::Tab(tab) => {
+                        // A tab sits inside its group band when it has one, and directly in
+                        // the bucket panel when it does not (the find view lists tabs under a
+                        // heading with no group).
+                        let (l, r) = match &group {
+                            Some(_) => (group_span.0 + TAB_INSET_L, group_span.1 - TAB_INSET_R),
+                            None => (bucket_span.0 + TAB_INSET_R, bucket_span.1 - TAB_INSET_R),
+                        };
+                        let card = Rect::from_min_max(
+                            pos2(l, rect.top() + GAP_Y),
+                            pos2(r, rect.bottom() - GAP_Y),
+                        );
                         draw_tab(&painter, card, tab, colors, ty, time, resp.hovered());
                         if resp.clicked() {
                             out.activate = Some(tab.id);
@@ -447,6 +719,12 @@ pub fn show(
                         });
                     }
                 }
+            }
+            if let Some((g, _)) = group.take() {
+                g.close(ui.painter());
+            }
+            if let Some(b) = bucket.take() {
+                b.close(ui.painter());
             }
             // Empty space below the last row is still part of the tab bar: a double-click
             // there opens a tab (the usual tab-bar gesture) and a right-click offers the
@@ -717,6 +995,57 @@ mod tests {
         let card_h = g.row_h - GAP_Y * 2.0;
         assert!(g.title_cy - line_box(13.0) / 2.0 >= 0.0);
         assert!(g.sub_cy.unwrap() + line_box(11.0) / 2.0 <= card_h);
+    }
+
+    /// The hue has to survive a restart, or the colour never becomes part of how a group is
+    /// recognised — which is the only reason to colour it.
+    #[test]
+    fn a_group_keeps_its_hue_across_runs() {
+        let keys = [
+            "local:/home/rayben/src/verterm",
+            "remote:orohost",
+            "elevated",
+        ];
+        let a = group_tints(&keys, GROUP_TINTS);
+        let b = group_tints(&keys, GROUP_TINTS);
+        assert_eq!(a, b);
+        // And it does not depend on what a *later* group is called.
+        let mut moved = keys.to_vec();
+        moved.push("container:sedanos");
+        assert_eq!(group_tints(&moved, GROUP_TINTS)[..3], a[..3]);
+    }
+
+    /// Two boxes stacked on each other in the same colour are one box, so neighbours are
+    /// always separated even when the hash puts them together.
+    #[test]
+    fn touching_groups_never_share_a_hue() {
+        // Enough keys that collisions are certain with only six hues.
+        let owned: Vec<String> = (0..200).map(|i| format!("local:/p/{i}")).collect();
+        let keys: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let t = group_tints(&keys, GROUP_TINTS);
+        for w in t.windows(2) {
+            assert_ne!(w[0], w[1], "adjacent groups share a hue");
+        }
+    }
+
+    #[test]
+    fn every_hue_index_is_in_range() {
+        let owned: Vec<String> = (0..100).map(|i| format!("remote:host{i}")).collect();
+        let keys: Vec<&str> = owned.iter().map(String::as_str).collect();
+        assert!(
+            group_tints(&keys, GROUP_TINTS)
+                .iter()
+                .all(|i| *i < GROUP_TINTS)
+        );
+    }
+
+    /// Degenerate inputs are reachable: a rail with no groups at all (the find view lists tabs
+    /// under a heading), and a palette that somehow offers nothing.
+    #[test]
+    fn tint_assignment_survives_degenerate_input() {
+        assert!(group_tints(&[], GROUP_TINTS).is_empty());
+        assert_eq!(group_tints(&["a", "b"], 0), vec![0, 0]);
+        assert_eq!(group_tints(&["a", "b"], 1), vec![0, 0]);
     }
 
     #[test]

@@ -99,14 +99,29 @@ on_bell = true                # notify on BEL when the tab is not focused
 timeout_ms = 6000
 
 [colors]
-foreground = "#d8dee9"
-background = "#101418"
-cursor = "#d8dee9"
-selection = "#2f3b4a"
-# Chrome accent: active tab, focus rings, overlay headers.
-accent = "#7fd1c1"
-normal = ["#181818", "#ac4242", "#90a959", "#f4bf75", "#6a9fb5", "#aa759f", "#75b5aa", "#d0d0d0"]
-bright = ["#6b6b6b", "#c55555", "#aac474", "#feca88", "#82b8c8", "#c28cb8", "#93d3c3", "#f5f5f5"]
+# One built-in scheme names the whole look. Everything the chrome draws — the rail's surfaces,
+# borders, badges, gauges and group bands — is derived from these sixteen ANSI colours and the
+# four specials, so this one line restyles the client and not just the grid. A light background
+# flips the chrome to a light treatment automatically.
+#
+#   dark   verterm-dark (default), catppuccin-mocha, tokyo-night, dracula, nord,
+#          gruvbox-dark, one-dark, solarized-dark
+#   light  catppuccin-latte, tokyo-night-day, solarized-light, gruvbox-light,
+#          one-light, github-light, everforest-light
+#
+# `verterm --list-themes` prints the list; `verterm --theme <name>` overrides it for one run.
+theme = "verterm-dark"
+
+# Any key below overrides the theme; omit it and the theme decides. Overriding `background`
+# alone is enough to take a dark theme light (or the reverse) — the chrome measures which it
+# is rather than trusting the theme's label. The values shown are what "verterm-dark" sets.
+# foreground = "#d8dee9"
+# background = "#101418"
+# cursor = "#d8dee9"
+# selection = "#2f3b4a"
+# accent = "#7fd1c1"          # chrome accent: active tab, focus rings, overlay headers
+# normal = ["#181818", "#ac4242", "#90a959", "#f4bf75", "#6a9fb5", "#aa759f", "#75b5aa", "#d0d0d0"]
+# bright = ["#6b6b6b", "#c55555", "#aac474", "#feca88", "#82b8c8", "#c28cb8", "#93d3c3", "#f5f5f5"]
 
 # Key bindings: "<action> = <chord>". Chords are Ctrl / Alt / Shift / Super plus an egui key
 # name ("A".."Z", "0".."9", "Space", "Backslash", "OpenBracket", "Enter", "F1", ...).

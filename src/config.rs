@@ -10,6 +10,8 @@ use anyhow::{Context, Result};
 use fs_watch::Watcher;
 use serde::{Deserialize, Serialize};
 
+use crate::themes::{self, Scheme};
+
 pub const DEFAULT_CONFIG_TOML: &str = include_str!("../config.example.toml");
 
 /// The shipped `[ai].system_prompt`. Byte-identical to the one in `config.example.toml`
@@ -244,53 +246,73 @@ impl Default for Notifications {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// The colour section: a named built-in scheme plus optional per-key overrides on top of it.
+///
+/// Every field but `theme` is an `Option` on purpose. serde's `default` cannot tell "the user
+/// wrote `accent = ...`" from "the user wrote nothing", so a concrete default here would
+/// silently override whatever theme was named; `None` is the only spelling of "leave this to
+/// the theme". [`Colors::resolve`] flattens the two into a [`Scheme`].
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Colors {
-    pub foreground: String,
-    pub background: String,
-    pub cursor: String,
-    pub selection: String,
+    /// Name of a built-in scheme (`themes::THEMES`). Empty or unknown falls back to
+    /// `themes::DEFAULT`; `verterm --list-themes` prints the list.
+    pub theme: Option<String>,
+    pub foreground: Option<String>,
+    pub background: Option<String>,
+    pub cursor: Option<String>,
+    pub selection: Option<String>,
     /// Chrome accent: active tab, focus rings, overlay headers.
-    pub accent: String,
-    pub normal: Vec<String>,
-    pub bright: Vec<String>,
+    pub accent: Option<String>,
+    /// The eight normal ANSI colours. Shorter lists fill from the theme, so overriding just
+    /// the first few is allowed.
+    pub normal: Option<Vec<String>>,
+    pub bright: Option<Vec<String>>,
 }
 
-impl Default for Colors {
-    fn default() -> Self {
-        Self {
-            foreground: "#d8dee9".into(),
-            background: "#101418".into(),
-            cursor: "#d8dee9".into(),
-            selection: "#2f3b4a".into(),
-            accent: "#7fd1c1".into(),
-            normal: [
-                "#181818", "#ac4242", "#90a959", "#f4bf75", "#6a9fb5", "#aa759f", "#75b5aa",
-                "#d0d0d0",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-            bright: [
-                "#6b6b6b", "#c55555", "#aac474", "#feca88", "#82b8c8", "#c28cb8", "#93d3c3",
-                "#f5f5f5",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
+impl Colors {
+    /// Flatten `theme` + overrides into the scheme the UI consumes. An unknown theme name or a
+    /// malformed hex value is a warning, never a startup failure: a config that is wrong about
+    /// one colour should still open a terminal.
+    pub fn resolve(&self) -> Scheme {
+        let name = self.theme.as_deref().unwrap_or(themes::DEFAULT);
+        let theme = themes::find(name).unwrap_or_else(|| {
+            if !name.is_empty() && name != themes::DEFAULT {
+                tracing::warn!(
+                    "unknown [colors].theme {name:?}; using {}. Run `verterm --list-themes` for the list.",
+                    themes::DEFAULT
+                );
+            }
+            themes::find(themes::DEFAULT).expect("the default theme is in the table")
+        });
+        let mut s = theme.resolve();
+
+        let over = |dst: &mut themes::Rgb, src: &Option<String>, what: &str| {
+            let Some(text) = src else { return };
+            match themes::parse_hex(text) {
+                Some(rgb) => *dst = rgb,
+                None => tracing::warn!("[colors].{what} = {text:?} is not #rrggbb; ignoring"),
+            }
+        };
+        over(&mut s.foreground, &self.foreground, "foreground");
+        over(&mut s.background, &self.background, "background");
+        over(&mut s.cursor, &self.cursor, "cursor");
+        over(&mut s.selection, &self.selection, "selection");
+        over(&mut s.accent, &self.accent, "accent");
+        for (dst, src) in [(&mut s.normal, &self.normal), (&mut s.bright, &self.bright)] {
+            let Some(list) = src else { continue };
+            for (i, text) in list.iter().take(8).enumerate() {
+                match themes::parse_hex(text) {
+                    Some(rgb) => dst[i] = rgb,
+                    None => tracing::warn!("[colors] ansi entry {i} = {text:?} is not #rrggbb"),
+                }
+            }
         }
+        // The chrome asks the *effective* background which way to go, so an overridden
+        // background flips the whole client to a light or dark treatment on its own.
+        s.dark = themes::is_dark(s.background);
+        s
     }
-}
-
-/// Parse `#rrggbb` (or `rrggbb`). Returns `None` on malformed input so callers can fall back.
-pub fn parse_hex(s: &str) -> Option<(u8, u8, u8)> {
-    let s = s.trim().trim_start_matches('#');
-    if s.len() != 6 {
-        return None;
-    }
-    let v = u32::from_str_radix(s, 16).ok()?;
-    Some(((v >> 16) as u8, (v >> 8) as u8, v as u8))
 }
 
 impl Config {
@@ -501,8 +523,7 @@ mod tests {
             cfg.ai.system_prompt, def.ai.system_prompt,
             "config.example.toml system_prompt must equal DEFAULT_SYSTEM_PROMPT"
         );
-        assert_eq!(cfg.colors.normal.len(), 8);
-        assert_eq!(cfg.colors.accent, def.colors.accent);
+        assert_eq!(cfg.colors.resolve(), def.colors.resolve());
         assert_eq!(cfg.font.ui_family, def.font.ui_family);
         assert!(cfg.keys.contains_key("toggle_rail"));
     }
@@ -580,10 +601,63 @@ mod tests {
         );
     }
 
+    /// The whole point of `Option` fields: an omitted key leaves the theme alone, a present
+    /// one wins. A concrete serde default here would silently overwrite the named theme.
     #[test]
-    fn hex_parsing() {
-        assert_eq!(parse_hex("#ff8000"), Some((255, 128, 0)));
-        assert_eq!(parse_hex("00ff00"), Some((0, 255, 0)));
-        assert_eq!(parse_hex("#fff"), None);
+    fn an_omitted_colour_key_leaves_the_theme_alone() {
+        let c: Colors = toml::from_str("theme = \"nord\"").expect("parses");
+        let nord = themes::find("nord").unwrap().resolve();
+        assert_eq!(c.resolve(), nord);
+    }
+
+    #[test]
+    fn a_present_colour_key_overrides_the_theme() {
+        let c: Colors = toml::from_str("theme = \"nord\"\naccent = \"#ff8000\"").expect("parses");
+        let s = c.resolve();
+        assert_eq!(s.accent, [0xff, 0x80, 0x00]);
+        // Everything else still comes from nord.
+        assert_eq!(
+            s.background,
+            themes::find("nord").unwrap().resolve().background
+        );
+    }
+
+    /// Overriding the background is how a user takes a dark theme light (or the reverse), so
+    /// the chrome's light/dark decision has to follow the override, not the theme's label.
+    #[test]
+    fn an_overridden_background_flips_the_chrome() {
+        let c: Colors =
+            toml::from_str("theme = \"nord\"\nbackground = \"#ffffff\"").expect("parses");
+        assert!(!c.resolve().dark, "a white background is not a dark theme");
+    }
+
+    #[test]
+    fn a_partial_ansi_override_fills_the_rest_from_the_theme() {
+        let c: Colors = toml::from_str("theme = \"nord\"\nnormal = [\"#000000\", \"#111111\"]")
+            .expect("parses");
+        let s = c.resolve();
+        let nord = themes::find("nord").unwrap().resolve();
+        assert_eq!(s.normal[0], [0, 0, 0]);
+        assert_eq!(s.normal[1], [0x11, 0x11, 0x11]);
+        assert_eq!(s.normal[2..], nord.normal[2..]);
+    }
+
+    /// A wrong theme name or a mistyped colour is a warning, not a startup failure — a config
+    /// that is wrong about one colour should still open a terminal.
+    #[test]
+    fn a_bad_theme_or_colour_falls_back_instead_of_failing() {
+        let c: Colors =
+            toml::from_str("theme = \"nope\"\naccent = \"not-a-colour\"").expect("parses");
+        let s = c.resolve();
+        let def = themes::find(themes::DEFAULT).unwrap().resolve();
+        assert_eq!(s, def);
+    }
+
+    #[test]
+    fn the_default_colours_are_the_default_theme() {
+        assert_eq!(
+            Colors::default().resolve(),
+            themes::find(themes::DEFAULT).unwrap().resolve()
+        );
     }
 }

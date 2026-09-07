@@ -13,6 +13,7 @@
 //! - `notify`            desktop notifications over the session D-Bus
 //! - `shell_integration` bash / zsh / fish hook scripts and their injection
 //! - `tabsearch`         finding a session by identity, or by what its scrollback contains
+//! - `themes`            the built-in colour schemes and how `[colors]` resolves into one
 //! - `ui`                eframe app: rail, terminal view, overlays, theme, fonts
 
 mod ai;
@@ -26,6 +27,7 @@ mod procscan;
 mod session;
 mod shell_integration;
 mod tabsearch;
+mod themes;
 mod ui;
 mod workspace;
 
@@ -45,6 +47,9 @@ pub struct Cli {
     /// Program + args to run instead of the login shell (`-e cmd args...`).
     pub command: Vec<String>,
     pub print_default_config: bool,
+    /// `--theme <name>`: overrides `[colors].theme` for this run. Kept alive past startup so a
+    /// config reload does not quietly drop it.
+    pub theme: Option<String>,
 }
 
 const USAGE: &str = "\
@@ -57,6 +62,8 @@ OPTIONS:
     -c, --config <file>              Use this config file instead of $XDG_CONFIG_HOME/verterm/config.toml
     -d, --working-directory <dir>    Start the first tab in this directory
     -e, --command <cmd> [args...]    Run <cmd> instead of the shell (everything after -e is the command)
+        --theme <name>               Override [colors].theme for this run
+        --list-themes                Print the built-in colour schemes and exit
         --print-default-config       Print the annotated default config.toml and exit
     -h, --help                       Show this help
     -V, --version                    Show version
@@ -73,6 +80,11 @@ fn parse_cli() -> Cli {
                 cli.command = args.by_ref().collect();
             }
             "--print-default-config" => cli.print_default_config = true,
+            "--theme" => cli.theme = args.next(),
+            "--list-themes" => {
+                print_themes();
+                std::process::exit(0);
+            }
             "-h" | "--help" => {
                 print!("{USAGE}");
                 std::process::exit(0);
@@ -88,6 +100,18 @@ fn parse_cli() -> Cli {
         }
     }
     cli
+}
+
+/// `--list-themes`: the built-in schemes, dark first, with the background each one paints so
+/// the list is useful without launching the app.
+fn print_themes() {
+    for t in themes::THEMES {
+        let mode = if t.dark { "dark " } else { "light" };
+        println!("{:<18} {mode}  bg {}", t.name, t.background);
+    }
+    println!(
+        "\nSet one with `theme = \"<name>\"` under [colors], or run `verterm --theme <name>`."
+    );
 }
 
 fn init_tracing() {
@@ -108,7 +132,10 @@ fn main() -> Result<()> {
     }
     init_tracing();
 
-    let config = config::Config::load(cli.config.as_deref())?;
+    let mut config = config::Config::load(cli.config.as_deref())?;
+    if let Some(name) = &cli.theme {
+        config.colors.theme = Some(name.clone());
+    }
     tracing::info!(
         version = APP_VERSION,
         config = %config::Config::default_path().map(|p| p.display().to_string()).unwrap_or_default(),
