@@ -98,6 +98,39 @@ threshold_secs = 3.0          # notify only when a command ran at least this lon
 on_bell = true                # notify on BEL when the tab is not focused
 timeout_ms = 6000
 
+[hyperlinks]
+enabled = true
+# What the left mouse button does to a link. "click" activates on release, and only when the
+# press and the release landed on the same link with nothing selected — so pressing inside a
+# URL to drag a selection still selects. "ctrl-click" is the escape hatch if you select text
+# inside URLs often; "none" turns mouse activation off (the context menu and Alt+U still work).
+activate = "click"
+# When each cue is drawn: "always" | "hover" | "never". Underline is the always-on default
+# because it is additive; recolouring overwrites the colour the program chose (ls output, a
+# diff, a log level), so it is held back to the link under the pointer.
+underline = "always"
+color = "hover"
+# Scan plain output for things that look like URIs. OSC 8 links — the escape sequence programs
+# use to attach a URL to arbitrary text — are honoured either way; they are explicit and need
+# no guessing. Detection follows RFC 3986: a hierarchical scheme must be followed by "//" and a
+# host, so "file: No such file or directory" and "git:reflog" are not links, and a trailing
+# bracket is kept only when it is balanced (".../Rust_(programming_language)" survives intact).
+detect = true
+detect_www = true            # bare www.example.com, opened as https://
+detect_emails = true         # bare user@example.com, opened as mailto:
+# The allowlist, and the security boundary: any program can print any bytes, and a scheme that
+# is not listed here is not a link and will never be handed to the opener. Note that a scheme
+# added here must use the "scheme://host" form unless it is one of the schemes that are opaque
+# by definition (mailto, tel, sms, magnet, news, urn, xmpp, sip, bitcoin, geo, matrix, …).
+# "data" and "javascript" are deliberately absent.
+schemes = [
+  "http", "https", "ftp", "ftps", "sftp", "file", "ssh", "git", "mailto", "tel", "sms",
+  "magnet", "news", "irc", "ircs", "gemini", "gopher", "s3", "gs", "smb", "nfs", "dav", "davs",
+  "webcal", "vnc", "rdp", "xmpp", "matrix", "ws", "wss", "vscode", "obsidian", "zoommtg",
+]
+# Command run to open a link; the URI is appended as the last argument.
+opener = ["xdg-open"]
+
 [colors]
 # One built-in scheme names the whole look. Everything the chrome draws — the rail's surfaces,
 # borders, badges, gauges and group bands — is derived from these sixteen ANSI colours and the

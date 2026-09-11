@@ -62,8 +62,19 @@ Requires a Wayland (or X11) session with Vulkan drivers, fontconfig (`fc-match`)
   under **SESSIONS**. Anything three characters or longer is *also* looked for in every tab's scrollback,
   listed under **CONTAINS TEXT** with the matching line, so `rapl` finds the tab that printed it.
   `↑`/`↓` select, `Enter` switches to it, `Esc` clears then closes.
-- **Fast jump** (`Alt+U` / `Super+F`): URLs, paths, IPs, UUIDs and git hashes get home-row tags; lowercase copies,
-  uppercase opens (URL) or pastes (path).
+- **Hyperlinks**: URLs in ordinary output are underlined and open on a plain left click — no modifier —
+  and so do OSC 8 links, the escape sequence programs use to attach a URL to arbitrary text. Detection
+  follows RFC 3986 rather than a loose pattern, so `file: No such file or directory` and `git:reflog` are
+  not links, `.../Rust_(programming_language)` keeps the paren that belongs to it while `(see https://x/a)`
+  does not, and `<https://x>` and `"https://x"` end where the delimiter does. `www.` hosts and bare
+  addresses are recognised and opened as `https://` and `mailto:`. Hovering shows the **real target** in
+  the status bar — an OSC 8 label can say anything — and the right-click menu names the target too, with
+  *Open* and *Copy link address*. A scheme that is not in `[hyperlinks].schemes` is not a link and is never
+  handed to the opener; everything here is configurable, including turning click activation off or back to
+  `ctrl-click`.
+- **Fast jump** (`Alt+U` / `Super+F`): links, paths, IPs, UUIDs and git hashes get home-row tags; lowercase copies,
+  uppercase opens (link) or pastes (path). OSC 8 links are in the list too, so a link whose label is prose
+  is still reachable from the keyboard.
 - **AI prompt** (`Ctrl+Space` / `Super+K`): describe a command in English; the reply streams into an overlay
   above the prompt. `Enter` inserts it into the prompt (bracketed paste, not executed), `Ctrl+Enter` runs it,
   `Esc` dismisses. Nothing reaches the shell without your keystroke. The model's `# what it does`
@@ -92,7 +103,8 @@ Rebind anything in `[keys]` (`action = "Ctrl+Shift+T"`, `action_alt = …` for a
 Mouse still works for selection (double = word, triple = line), wheel scrolling and clicking rail rows
 — it is never required. Right-click opens a context menu: on the grid, copy/paste plus the URL or path
 under the pointer (open or copy it without entering hint mode), select all, search, hints, Ask AI, a new
-tab in the same directory, clear scrollback and close tab; on a tab row, activate, copy the working
+tab in the same directory, clear scrollback and close tab — plus *Open* and *Copy link address* when the
+pointer is on a hyperlink, both labelled with the target rather than the link text; on a tab row, activate, copy the working
 directory, move between groups, new tab and close tab; on empty rail space, new tab/scratchpad and
 collapse or expand all groups. Middle-clicking a tab closes it; double-clicking empty space on the tab
 rail opens a new tab.
@@ -106,6 +118,7 @@ rail opens a new tab.
 | `[font]` | `family` (list, first fontconfig match wins), `ui_family` (proportional face for the chrome), `size`, `line_height` |
 | `[ai]` | `enabled`, `endpoint` (`https://orohost:11434`), `model`, `stream`, `temperature`, `insecure_tls`, `timeout_secs`, `context_lines`, `position` (`bottom-right` \| `bottom-left` \| `top-right` \| `top-left` \| `center` \| `prompt`), `system_prompt` |
 | `[notifications]` | `enabled`, `threshold_secs`, `on_bell`, `timeout_ms` |
+| `[hyperlinks]` | `enabled`, `activate` (`click` \| `ctrl-click` \| `none`), `underline` / `color` (`always` \| `hover` \| `never`), `detect`, `detect_www`, `detect_emails`, `schemes` (the allowlist — a scheme not listed is never opened), `opener` (argv; the URI is appended) |
 | `[colors]` | `theme` (built-in scheme, see below), plus optional per-key overrides: `foreground`, `background`, `cursor`, `selection`, `accent` (chrome accent), `normal[8]`, `bright[8]` |
 | `[keys]` | `action = "Chord"` |
 

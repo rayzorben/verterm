@@ -6,6 +6,7 @@ use std::io::{Read, Write};
 use std::os::fd::BorrowedFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -185,6 +186,19 @@ pub struct SessionShared {
     pub id: TabId,
     pub shell_pid: i32,
     pub state: Mutex<SessionState>,
+    /// Bumped by the reader thread every time it advances the parser, i.e. exactly when the
+    /// grid may have changed. It is the cheap cache key the GUI thread needs for anything it
+    /// would otherwise recompute from the whole viewport on every repaint — link detection,
+    /// today. Repaints are far more frequent than grid changes (cursor blink alone is two a
+    /// second on an idle tab), so keying on this and not on the frame is the difference
+    /// between scanning the screen 60 times a second and scanning it when it changes.
+    grid_generation: AtomicU64,
+}
+
+impl SessionShared {
+    pub fn grid_generation(&self) -> u64 {
+        self.grid_generation.load(Ordering::Relaxed)
+    }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -368,6 +382,7 @@ impl Session {
             id,
             shell_pid,
             state: Mutex::new(SessionState::default()),
+            grid_generation: AtomicU64::new(0),
         });
         let size = Arc::new(Mutex::new(WindowSize {
             num_lines: rows,
@@ -586,6 +601,7 @@ fn reader_loop(
             }
             processor.advance(&mut *t, &filtered[pos..]);
         }
+        shared.grid_generation.fetch_add(1, Ordering::Relaxed);
         if !positioned.is_empty() {
             apply_osc_events(&shared, &positioned);
         }

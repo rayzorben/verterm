@@ -78,6 +78,7 @@ pub struct Config {
     pub font: Font,
     pub ai: Ai,
     pub notifications: Notifications,
+    pub hyperlinks: Hyperlinks,
     pub colors: Colors,
     /// `action_name = "Chord"`; see `keymap::Action::name`.
     pub keys: BTreeMap<String, String>,
@@ -243,6 +244,101 @@ impl Default for Notifications {
             on_bell: true,
             timeout_ms: 6000,
         }
+    }
+}
+
+/// What a left click on a link does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LinkActivate {
+    /// A plain click opens it. The link is activated on *release*, and only when press and
+    /// release landed on the same link with no selection dragged in between, so a click that
+    /// starts a selection inside a URL still selects.
+    #[default]
+    Click,
+    /// `Ctrl` must be held, the way most terminals do it. The escape hatch for anyone who
+    /// selects text inside URLs often enough that opening one by accident is worse than the
+    /// extra key.
+    CtrlClick,
+    /// Mouse activation off entirely; links are still drawn, still in the context menu and
+    /// still reachable from hint mode.
+    None,
+}
+
+/// When a link decoration is painted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LinkDecor {
+    /// On every link, all the time.
+    Always,
+    /// Only on the link under the pointer.
+    #[default]
+    Hover,
+    Never,
+}
+
+impl LinkDecor {
+    pub fn shows(self, hovered: bool) -> bool {
+        match self {
+            LinkDecor::Always => true,
+            LinkDecor::Hover => hovered,
+            LinkDecor::Never => false,
+        }
+    }
+}
+
+/// Hyperlink recognition, styling and activation.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Hyperlinks {
+    /// Master switch. Off means no detection, no OSC 8, no styling, no clicking.
+    pub enabled: bool,
+    pub activate: LinkActivate,
+    /// Underline is the default always-on cue because it is *additive*: it marks the text as a
+    /// link without overwriting the colour the program chose, which recolouring does.
+    pub underline: LinkDecor,
+    pub color: LinkDecor,
+    /// Scan plain output for things that look like URIs. OSC 8 links are honoured either way —
+    /// those are explicit and need no guessing.
+    pub detect: bool,
+    pub detect_www: bool,
+    pub detect_emails: bool,
+    /// The allowlist. A scheme that is not here is not a link and will not be opened, which is
+    /// the boundary that keeps arbitrary program output from reaching a URI handler.
+    pub schemes: Vec<String>,
+    /// Command used to open a link; the URI is appended as the last argument.
+    pub opener: Vec<String>,
+}
+
+impl Default for Hyperlinks {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            activate: LinkActivate::Click,
+            underline: LinkDecor::Always,
+            color: LinkDecor::Hover,
+            detect: true,
+            detect_www: true,
+            detect_emails: true,
+            schemes: crate::links::DEFAULT_SCHEMES
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            opener: vec!["xdg-open".into()],
+        }
+    }
+}
+
+impl Hyperlinks {
+    /// Compile the detector this section describes. `enabled = false` or `detect = false` still
+    /// yields a matcher, because [`crate::links::Matcher::allows`] is what gates OSC 8 URIs.
+    pub fn matcher(&self) -> crate::links::Matcher {
+        crate::links::Matcher::new(
+            &self.schemes,
+            self.detect,
+            self.detect_www,
+            self.detect_emails,
+        )
     }
 }
 
@@ -525,6 +621,10 @@ mod tests {
         );
         assert_eq!(cfg.colors.resolve(), def.colors.resolve());
         assert_eq!(cfg.font.ui_family, def.font.ui_family);
+        assert_eq!(
+            cfg.hyperlinks, def.hyperlinks,
+            "config.example.toml [hyperlinks] must equal Hyperlinks::default()"
+        );
         assert!(cfg.keys.contains_key("toggle_rail"));
     }
 
@@ -533,6 +633,52 @@ mod tests {
         let cfg: Config = toml::from_str(DEFAULT_CONFIG_TOML).expect("example config parses");
         assert_eq!(cfg.ai.position, AiPosition::BottomRight);
         assert_eq!(cfg.ai.position, Config::default().ai.position);
+    }
+
+    #[test]
+    fn link_option_names_parse_from_kebab_case() {
+        #[derive(Deserialize)]
+        struct A {
+            v: LinkActivate,
+        }
+        #[derive(Deserialize)]
+        struct D {
+            v: LinkDecor,
+        }
+        let a = |s: &str| toml::from_str::<A>(&format!("v = \"{s}\"")).map(|w| w.v);
+        let d = |s: &str| toml::from_str::<D>(&format!("v = \"{s}\"")).map(|w| w.v);
+        assert_eq!(a("click").unwrap(), LinkActivate::Click);
+        assert_eq!(a("ctrl-click").unwrap(), LinkActivate::CtrlClick);
+        assert_eq!(a("none").unwrap(), LinkActivate::None);
+        assert!(a("ctrl_click").is_err(), "underscores are not the spelling");
+        assert_eq!(d("always").unwrap(), LinkDecor::Always);
+        assert_eq!(d("hover").unwrap(), LinkDecor::Hover);
+        assert_eq!(d("never").unwrap(), LinkDecor::Never);
+    }
+
+    /// The shipped default: a link is always underlined (an additive cue that does not fight
+    /// the program's own colours) and only recoloured under the pointer.
+    #[test]
+    fn link_decor_answers_for_the_right_cells() {
+        assert!(LinkDecor::Always.shows(false));
+        assert!(LinkDecor::Always.shows(true));
+        assert!(!LinkDecor::Hover.shows(false));
+        assert!(LinkDecor::Hover.shows(true));
+        assert!(!LinkDecor::Never.shows(true));
+    }
+
+    /// `detect = false` must still leave the scheme allowlist intact, because that list is
+    /// what decides whether an OSC 8 URI may be opened at all.
+    #[test]
+    fn detection_off_still_gates_osc8_schemes() {
+        let cfg = Hyperlinks {
+            detect: false,
+            ..Hyperlinks::default()
+        };
+        let m = cfg.matcher();
+        assert!(m.find("see https://example.com/a").is_empty());
+        assert!(m.allows("https://example.com/a"));
+        assert!(!m.allows("javascript:alert(1)"));
     }
 
     #[test]

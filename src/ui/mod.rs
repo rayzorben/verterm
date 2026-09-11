@@ -26,10 +26,11 @@ use egui::{Align2, CornerRadius, Event, Key, Modifiers, Rect, Sense, Stroke, pos
 
 use crate::Cli;
 use crate::ai::AiClient;
-use crate::config::{Config, RailSide, UiState};
+use crate::config::{Config, LinkActivate, RailSide, UiState};
 use crate::hints::{self, HintKind, HintMatch};
 use crate::input;
 use crate::keymap::{Action, Chord, Keymap};
+use crate::links::Matcher;
 use crate::notify;
 use crate::procscan::{self, ScanRegistry};
 use crate::session::{
@@ -45,7 +46,7 @@ use overlays::{
     SearchOutcome,
 };
 use rail::{Badge, Indicator, Row, TabRow};
-use terminal_view::{HintOverlay, RenderCtx};
+use terminal_view::{GridLink, HintOverlay, LinkOverlay, RenderCtx};
 use theme::{Palette, UiColors};
 
 // ---------------------------------------------------------------------------------------
@@ -131,6 +132,9 @@ struct TermMenuContext {
     selection: Option<String>,
     /// URL / path / IP / hash under the click, for "Open" and "Copy" without hint mode.
     hint: Option<HintMatch>,
+    /// Hyperlink under the click (OSC 8 or detected). Separate from `hint` because an OSC 8
+    /// link's *label* need not look like a URL at all, so the pattern scan cannot find it.
+    link: Option<GridLink>,
     /// Working directory of the tab, for "New tab here".
     cwd: Option<PathBuf>,
 }
@@ -140,6 +144,8 @@ struct TermMenuContext {
 enum TermMenuAction {
     Copy,
     Paste,
+    OpenLink,
+    CopyLink,
     OpenHint,
     CopyHint,
     SelectAll,
@@ -308,6 +314,19 @@ pub struct App {
     /// The rail's find box. Lives on the App rather than in `Mode` because the box stays on
     /// screen (and keeps its query) whether or not it currently owns the keyboard.
     find: FindState,
+    /// Compiled from `[hyperlinks]`; rebuilt on config reload because the scheme allowlist is
+    /// baked into the pattern.
+    link_matcher: Matcher,
+    /// Links on the active tab's visible grid, recomputed only when the grid or the view
+    /// actually moved — see `sync_links`.
+    links: Vec<GridLink>,
+    /// What `links` was computed from: tab, grid generation, scroll position, size.
+    links_key: Option<(TabId, u64, usize, u16, u16)>,
+    /// Index into `links` of the one under the pointer this frame.
+    hovered_link: Option<usize>,
+    /// The link the primary button went down on. Activation waits for the release on the same
+    /// link with nothing selected, so pressing inside a URL to drag a selection still selects.
+    link_press: Option<usize>,
 }
 
 impl App {
@@ -360,6 +379,8 @@ impl App {
             None
         };
 
+        let link_matcher = cfg.hyperlinks.matcher();
+
         let ai = if cfg.ai.enabled {
             match AiClient::new(cfg.ai.clone()) {
                 Ok(c) => Some(c),
@@ -409,6 +430,11 @@ impl App {
             config_rx,
             theme_override: cli.theme.clone(),
             paste_rx: None,
+            link_matcher,
+            links: Vec::new(),
+            links_key: None,
+            hovered_link: None,
+            link_press: None,
         };
         for w in warnings {
             app.toast(w);
@@ -495,6 +521,13 @@ impl App {
             } else {
                 None
             };
+        }
+
+        if cfg.hyperlinks != self.cfg.hyperlinks {
+            self.link_matcher = cfg.hyperlinks.matcher();
+            self.links.clear();
+            self.links_key = None;
+            self.hovered_link = None;
         }
 
         self.cfg = cfg;
@@ -1211,8 +1244,46 @@ impl App {
         let Some(idx) = self.active_index() else {
             return;
         };
-        let rows = terminal_view::viewport_rows(&self.sessions[idx].term.lock());
-        let matches = hints::find_hints(&rows);
+        let mut matches = {
+            let t = self.sessions[idx].term.lock();
+            let rows = terminal_view::viewport_rows(&t);
+            let hyper = &self.cfg.hyperlinks;
+            // Links come from `viewport_links`, not from the URL pass inside `find_hints`:
+            // that is the one that knows about OSC 8 (whose label is whatever the program
+            // chose, so no pattern can find it) and about wrapped rows. `find_hints` still
+            // gets the matcher, because a URL claiming its span first is what stops the path
+            // and hash patterns carving a piece out of the middle of one.
+            let mut matches: Vec<HintMatch> = if hyper.enabled {
+                terminal_view::viewport_links(&t, &self.link_matcher, hyper.detect)
+                    .into_iter()
+                    .map(|l| {
+                        let head = l.head();
+                        HintMatch {
+                            row: head.row,
+                            col_start: head.col_start,
+                            col_end: head.col_end,
+                            text: l.text,
+                            kind: HintKind::Url,
+                            uri: Some(l.uri),
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            for h in hints::find_hints(&rows, &self.link_matcher) {
+                let covered = matches
+                    .iter()
+                    .any(|m| m.row == h.row && h.col_start < m.col_end && h.col_end > m.col_start);
+                if covered || (hyper.enabled && h.kind == HintKind::Url) {
+                    continue;
+                }
+                matches.push(h);
+            }
+            matches.sort_by_key(|h| (h.row, h.col_start));
+            matches
+        };
+        matches.dedup_by(|a, b| a.row == b.row && a.col_start == b.col_start);
         if matches.is_empty() {
             self.toast("no URLs, paths, IPs, UUIDs or hashes on screen");
             return;
@@ -1233,27 +1304,70 @@ impl App {
                 self.toast(format!("copied {}", hm.text));
             }
             (true, HintKind::Url) => {
-                let url = if hm.text.starts_with("www.") {
-                    format!("https://{}", hm.text)
-                } else {
-                    hm.text.clone()
-                };
-                match std::process::Command::new("xdg-open")
-                    .arg(&url)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()
-                {
-                    Ok(_) => self.toast(format!("opened {url}")),
-                    Err(e) => self.toast(format!("xdg-open failed: {e}")),
-                }
+                let uri = hm.uri.clone().unwrap_or_else(|| hm.text.clone());
+                self.open_uri(&uri);
             }
             (true, _) => {
                 let text = shell_quote(&hm.text);
                 self.sessions[idx].paste(&text);
             }
         }
+    }
+
+    /// Hand a URI to the configured opener.
+    ///
+    /// The allowlist is re-checked here rather than trusted from whoever found the link: OSC 8
+    /// URIs come straight out of program output and never passed through detection, and this
+    /// is the single point where a URI leaves verterm for a desktop handler.
+    fn open_uri(&mut self, uri: &str) {
+        if !self.link_matcher.allows(uri) {
+            let scheme = uri.split(':').next().unwrap_or(uri);
+            self.toast(format!(
+                "{scheme}: links are not enabled — add it to [hyperlinks].schemes"
+            ));
+            return;
+        }
+        let Some((program, args)) = self.cfg.hyperlinks.opener.split_first() else {
+            self.toast("[hyperlinks].opener is empty");
+            return;
+        };
+        match std::process::Command::new(program)
+            .args(args)
+            .arg(uri)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_) => self.toast(format!("opened {}", elide_menu_text(uri))),
+            Err(e) => self.toast(format!("{program} failed: {e}")),
+        }
+    }
+
+    /// Refresh `self.links` for the active tab, but only when something it depends on moved.
+    ///
+    /// A repaint is not a grid change — cursor blink alone asks for two a second on an idle
+    /// tab — so the key is the reader thread's grid generation plus the scroll position and
+    /// size, which together are the whole input to the scan.
+    fn sync_links(&mut self, idx: usize, cols: u16, rows: u16) {
+        if !self.cfg.hyperlinks.enabled {
+            if !self.links.is_empty() {
+                self.links.clear();
+                self.links_key = None;
+            }
+            return;
+        }
+        let s = &self.sessions[idx];
+        let generation = s.shared.grid_generation();
+        let offset = s.term.lock().grid().display_offset();
+        let key = (s.id, generation, offset, cols, rows);
+        if self.links_key == Some(key) {
+            return;
+        }
+        let detect = self.cfg.hyperlinks.detect;
+        self.links = terminal_view::viewport_links(&s.term.lock(), &self.link_matcher, detect);
+        self.links_key = Some(key);
+        self.hovered_link = None;
     }
 
     // -----------------------------------------------------------------------------------
@@ -1317,6 +1431,12 @@ impl App {
         let mut copy_selection = false;
         let mut paste_text: Option<String> = None;
         let mut scroll = 0i32;
+        let mut open_link: Option<String> = None;
+        let activate = if self.cfg.hyperlinks.enabled {
+            self.cfg.hyperlinks.activate
+        } else {
+            LinkActivate::None
+        };
 
         for ev in events {
             match ev {
@@ -1358,8 +1478,36 @@ impl App {
                     pos,
                     button: egui::PointerButton::Primary,
                     pressed,
-                    ..
+                    modifiers,
                 } => {
+                    // A link is armed on press and fired on release, and only if the release
+                    // lands on the same link with nothing selected. Firing on press would
+                    // make it impossible to start a selection inside a URL, and would fire
+                    // mid-drag; requiring the same link is what makes a drag that happens to
+                    // end on another link do nothing.
+                    let hit = match activate {
+                        LinkActivate::None => None,
+                        LinkActivate::Click if modifiers.any() => None,
+                        LinkActivate::Click => {
+                            terminal_view::link_at(&self.links, pos, term_rect, self.metrics)
+                        }
+                        LinkActivate::CtrlClick if !modifiers.ctrl => None,
+                        LinkActivate::CtrlClick => {
+                            terminal_view::link_at(&self.links, pos, term_rect, self.metrics)
+                        }
+                    };
+                    if pressed {
+                        self.link_press = hit;
+                    } else if let Some(armed) = self.link_press.take()
+                        && hit == Some(armed)
+                        && term
+                            .lock()
+                            .selection
+                            .as_ref()
+                            .is_none_or(|sel| sel.is_empty())
+                    {
+                        open_link = self.links.get(armed).map(|l| l.uri.clone());
+                    }
                     if pressed && term_rect.contains(pos) {
                         let now = Instant::now();
                         let clicks = match self.last_click {
@@ -1402,6 +1550,9 @@ impl App {
             }
         }
 
+        if let Some(uri) = open_link {
+            self.open_uri(&uri);
+        }
         if copy_selection && let Some(text) = term.lock().selection_to_string() {
             ctx.copy_text(text);
         }
@@ -1484,11 +1635,15 @@ impl App {
             let (selection, hint) = {
                 let t = term.lock();
                 let selection = t.selection_to_string().filter(|s| !s.is_empty());
-                let hint = pos
-                    .filter(|p| term_rect.contains(*p))
-                    .and_then(|p| terminal_view::hint_at(p, term_rect, self.metrics, &t));
+                let hint = pos.filter(|p| term_rect.contains(*p)).and_then(|p| {
+                    terminal_view::hint_at(p, term_rect, self.metrics, &t, &self.link_matcher)
+                });
                 (selection, hint)
             };
+            let link = pos
+                .filter(|_| self.cfg.hyperlinks.enabled)
+                .and_then(|p| terminal_view::link_at(&self.links, p, term_rect, self.metrics))
+                .and_then(|i| self.links.get(i).cloned());
             let cwd = self.sessions[idx]
                 .shared
                 .state
@@ -1498,6 +1653,7 @@ impl App {
             self.term_menu = TermMenuContext {
                 selection,
                 hint,
+                link,
                 cwd,
             };
         }
@@ -1516,7 +1672,27 @@ impl App {
                 action = Some(TermMenuAction::Paste);
                 ui.close();
             }
-            if let Some(h) = &menu.hint {
+            if let Some(l) = &menu.link {
+                ui.separator();
+                // The *target* is what the items name, never the label. An OSC 8 link can put
+                // any text on screen for any URI, so a menu that offered to "Open
+                // https://your-bank" while pointing somewhere else would be the terminal
+                // helping with the deception.
+                let target = elide_menu_text(&l.uri);
+                if ui.button(format!("Open {target}")).clicked() {
+                    action = Some(TermMenuAction::OpenLink);
+                    ui.close();
+                }
+                if ui.button("Copy link address").clicked() {
+                    action = Some(TermMenuAction::CopyLink);
+                    ui.close();
+                }
+            }
+            // Paths, IPs, UUIDs and hashes — anything under the pointer that is not already
+            // covered by the link items above.
+            if let Some(h) = &menu.hint
+                && !(menu.link.is_some() && h.kind == HintKind::Url)
+            {
                 ui.separator();
                 let label = elide_menu_text(&h.text);
                 if h.kind == HintKind::Url && ui.button(format!("Open {label}")).clicked() {
@@ -1578,6 +1754,17 @@ impl App {
                 }
             }
             TermMenuAction::Paste => self.request_clipboard_paste(ctx, idx),
+            TermMenuAction::OpenLink => {
+                if let Some(l) = menu.link {
+                    self.open_uri(&l.uri);
+                }
+            }
+            TermMenuAction::CopyLink => {
+                if let Some(l) = menu.link {
+                    self.toast(format!("copied {}", elide_menu_text(&l.uri)));
+                    ctx.copy_text(l.uri);
+                }
+            }
             TermMenuAction::OpenHint => {
                 if let Some(h) = menu.hint {
                     self.hint_action(ctx, idx, &h, true);
@@ -2055,6 +2242,18 @@ impl App {
         let cell_px = self.cell_px(ctx);
         self.sessions[idx].resize(cols, rows, cell_px);
 
+        // Links are resolved before input so a click can act on the same set the frame draws.
+        self.sync_links(idx, cols, rows);
+        self.hovered_link = ctx
+            .input(|i| i.pointer.hover_pos())
+            .and_then(|p| terminal_view::link_at(&self.links, p, term_rect, self.metrics));
+        if self.hovered_link.is_some()
+            && self.cfg.hyperlinks.activate != LinkActivate::None
+            && matches!(self.mode, Mode::Normal)
+        {
+            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+
         let response = ui.allocate_rect(pane, Sense::click_and_drag());
         self.handle_terminal_input(ctx, idx, term_rect, &response);
         self.terminal_context_menu(ctx, idx, term_rect, &response);
@@ -2087,6 +2286,12 @@ impl App {
                 Mode::Vi(v) => v.search.as_ref().and_then(|s| s.current.as_ref()),
                 _ => None,
             };
+            let link_overlay = self.cfg.hyperlinks.enabled.then(|| LinkOverlay {
+                links: &self.links,
+                hovered: self.hovered_link,
+                underline: self.cfg.hyperlinks.underline,
+                color: self.cfg.hyperlinks.color,
+            });
             let rc = RenderCtx {
                 palette: &self.palette,
                 colors: &self.colors,
@@ -2096,6 +2301,7 @@ impl App {
                 focused,
                 cursor_visible,
                 hints: hints_overlay,
+                links: link_overlay,
                 search_match,
             };
             terminal_view::render(ui.painter(), term_rect, &term, &rc);
@@ -2225,14 +2431,28 @@ impl App {
         for chip in &chips {
             x += chip.paint(&p, x, cy) + 6.0;
         }
-        if let Some(cwd) = st.cwd() {
+        // A hovered link takes the cwd's place and shows its **target**, the way a browser
+        // does. This is the only place the user can see where an OSC 8 link actually goes:
+        // its on-screen label is chosen by the program and can say anything.
+        let hovered_uri = self
+            .hovered_link
+            .and_then(|i| self.links.get(i))
+            .map(|l| l.uri.as_str());
+        let (text, color) = match hovered_uri {
+            Some(uri) => (uri.to_string(), c.link),
+            None => match st.cwd() {
+                Some(cwd) => (shorten_home(cwd, &self.home), c.muted),
+                None => (String::new(), c.muted),
+            },
+        };
+        if !text.is_empty() {
             chrome::line(
                 &p,
                 x + 2.0,
                 cy,
-                &shorten_home(cwd, &self.home),
+                &text,
                 &ty.mono_small,
-                c.muted,
+                color,
                 (right - x - 12.0).max(0.0),
             );
         }

@@ -1,9 +1,16 @@
-//! Fast-jump hints: regex-scan the visible grid for URLs, file paths, IPs, UUIDs and git
-//! hashes, then label each with a home-row tag. Pure logic — no egui here.
+//! Fast-jump hints: scan the visible grid for URLs, file paths, IPs, UUIDs and git hashes,
+//! then label each with a home-row tag. Pure logic — no egui here.
+//!
+//! URLs are **not** matched here. They come from [`crate::links::Matcher`], so that the thing
+//! hint mode will open and the thing a click will open are decided by one piece of code
+//! obeying one `[hyperlinks]` configuration — two URL patterns drifting apart is exactly how a
+//! terminal ends up highlighting a link it then refuses to open.
 
 use std::sync::LazyLock;
 
 use regex::Regex;
+
+use crate::links::Matcher;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HintKind {
@@ -22,6 +29,9 @@ pub struct HintMatch {
     pub col_end: usize,
     pub text: String,
     pub kind: HintKind,
+    /// For [`HintKind::Url`], the URI to open — `www.x` normalised to `https://www.x`, a bare
+    /// address to `mailto:`. `None` for every other kind, whose text *is* the payload.
+    pub uri: Option<String>,
 }
 
 /// One rendered terminal row: the text plus, for every char, the grid column it occupies
@@ -58,10 +68,6 @@ static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     };
     vec![
         p(
-            HintKind::Url,
-            r#"(?:https?|ftp|file|ssh|git|s3|gs)://[^\s'"<>()\[\]{}]+|www\.[A-Za-z0-9-]+\.[^\s'"<>()\[\]{}]+"#,
-        ),
-        p(
             HintKind::Uuid,
             r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b",
         ),
@@ -77,9 +83,9 @@ static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     ]
 });
 
-/// Find all hints in the visible rows. Overlapping matches are resolved by pattern
-/// priority (URLs beat paths, UUIDs beat hashes) and then by length.
-pub fn find_hints(rows: &[RowText]) -> Vec<HintMatch> {
+/// Find all hints in the visible rows. Overlapping matches are resolved by priority — links
+/// first, then UUIDs before the git hashes they would otherwise be mistaken for.
+pub fn find_hints(rows: &[RowText], links: &Matcher) -> Vec<HintMatch> {
     let mut out = Vec::new();
     for (row_idx, row) in rows.iter().enumerate() {
         if row.text.trim().is_empty() {
@@ -88,7 +94,27 @@ pub fn find_hints(rows: &[RowText]) -> Vec<HintMatch> {
         // Byte offset → char index → grid column.
         let char_starts: Vec<usize> = row.text.char_indices().map(|(b, _)| b).collect();
         let byte_to_char = |b: usize| char_starts.partition_point(|&s| s < b);
+        let col = |cs: usize, ce: usize| {
+            (
+                row.cols.get(cs).copied().unwrap_or(cs),
+                row.cols.get(ce - 1).map(|c| c + 1).unwrap_or(ce),
+            )
+        };
         let mut taken: Vec<(usize, usize)> = Vec::new(); // char ranges already claimed
+        // Links claim their span before anything else runs, so a path or hash pattern can
+        // never carve a piece out of the middle of a URL.
+        for lm in links.find(&row.text) {
+            let (col_start, col_end) = col(lm.start, lm.end);
+            taken.push((lm.start, lm.end));
+            out.push(HintMatch {
+                row: row_idx,
+                col_start,
+                col_end,
+                text: lm.text,
+                kind: HintKind::Url,
+                uri: Some(lm.uri),
+            });
+        }
         for pat in PATTERNS.iter() {
             for m in pat.re.find_iter(&row.text) {
                 let (cs, ce) = (byte_to_char(m.start()), byte_to_char(m.end()));
@@ -109,14 +135,14 @@ pub fn find_hints(rows: &[RowText]) -> Vec<HintMatch> {
                 }
                 let ce = cs + text.chars().count();
                 taken.push((cs, ce));
-                let col_start = row.cols.get(cs).copied().unwrap_or(cs);
-                let col_end = row.cols.get(ce - 1).map(|c| c + 1).unwrap_or(ce);
+                let (col_start, col_end) = col(cs, ce);
                 out.push(HintMatch {
                     row: row_idx,
                     col_start,
                     col_end,
                     text,
                     kind: pat.kind,
+                    uri: None,
                 });
             }
         }
@@ -159,6 +185,10 @@ pub fn assign_tags(n: usize) -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn links() -> Matcher {
+        Matcher::default()
+    }
+
     fn row(s: &str) -> RowText {
         let mut r = RowText::default();
         for (i, c) in s.chars().enumerate() {
@@ -172,7 +202,7 @@ mod tests {
         let rows = vec![row(
             "see https://example.com/a?b=1, /etc/nginx/nginx.conf:42 host 10.0.0.7:22 id 123e4567-e89b-12d3-a456-426614174000 at deadbeefcafe",
         )];
-        let hints = find_hints(&rows);
+        let hints = find_hints(&rows, &links());
         let kinds: Vec<_> = hints.iter().map(|h| h.kind).collect();
         assert_eq!(
             kinds,
@@ -191,7 +221,10 @@ mod tests {
 
     #[test]
     fn relative_paths_and_files() {
-        let hints = find_hints(&[row("error in src/ui/mod.rs:120:5 and Cargo.toml")]);
+        let hints = find_hints(
+            &[row("error in src/ui/mod.rs:120:5 and Cargo.toml")],
+            &links(),
+        );
         let texts: Vec<_> = hints.iter().map(|h| h.text.as_str()).collect();
         assert_eq!(texts, vec!["src/ui/mod.rs:120:5", "Cargo.toml"]);
     }
@@ -206,9 +239,52 @@ mod tests {
         for (i, c) in "/tmp".chars().enumerate() {
             r.push(c, 5 + i);
         }
-        let hints = find_hints(&[r]);
+        let hints = find_hints(&[r], &links());
         assert_eq!(hints.len(), 1);
         assert_eq!((hints[0].col_start, hints[0].col_end), (5, 9));
+    }
+
+    /// Hint mode must reach a URL by the same rules a click does, `uri` included — that is the
+    /// whole point of delegating to `links::Matcher` instead of keeping a second pattern here.
+    #[test]
+    fn url_hints_carry_the_normalised_uri() {
+        let hints = find_hints(&[row("ping www.example.com or ops@example.com")], &links());
+        let pairs: Vec<_> = hints
+            .iter()
+            .map(|h| (h.kind, h.text.as_str(), h.uri.as_deref()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                (
+                    HintKind::Url,
+                    "www.example.com",
+                    Some("https://www.example.com")
+                ),
+                (
+                    HintKind::Url,
+                    "ops@example.com",
+                    Some("mailto:ops@example.com")
+                ),
+            ]
+        );
+    }
+
+    /// The path and git-hash patterns are hungry; a URL claims its span first so neither can
+    /// take a bite out of the middle of one.
+    #[test]
+    fn a_url_is_never_carved_up_by_the_other_patterns() {
+        let hints = find_hints(
+            &[row(
+                "fetch https://example.com/deadbeefcafe/src/ui/mod.rs now",
+            )],
+            &links(),
+        );
+        let texts: Vec<_> = hints.iter().map(|h| h.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["https://example.com/deadbeefcafe/src/ui/mod.rs"]
+        );
     }
 
     #[test]

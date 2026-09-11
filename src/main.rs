@@ -21,6 +21,7 @@ mod config;
 mod hints;
 mod input;
 mod keymap;
+mod links;
 mod notify;
 mod osc;
 mod procscan;

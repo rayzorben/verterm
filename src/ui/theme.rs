@@ -159,6 +159,11 @@ pub struct UiColors {
     pub search: Color32,
     pub hint_bg: Color32,
     pub hint_fg: Color32,
+    /// Hyperlink text, painted **on the grid** rather than on a chrome surface — so unlike the
+    /// accents above it is corrected against the terminal background, and to the full AA body
+    /// floor (4.5) rather than the large-text one: this is running text a user reads, not a
+    /// 12 px chip.
+    pub link: Color32,
     /// The hues a rail group is banded with, in the order they are handed out. Six is enough
     /// that adjacent groups always differ (see `rail::group_tints`) without the rail turning
     /// into a paint chart; they are the scheme's own chromatic ANSI colours, so the banding
@@ -231,6 +236,9 @@ fn on(bg: Color32) -> Color32 {
 /// applicable floor and forcing more would wash every palette toward the same pastel.
 const ACCENT_CONTRAST: f32 = 3.2;
 
+/// Contrast for chrome colours painted as *text on the grid* — WCAG AA for body text.
+const TEXT_CONTRAST: f32 = 4.5;
+
 impl UiColors {
     pub fn from_scheme(s: &Scheme) -> Self {
         let bg = to_color32(to_rgb(s.background));
@@ -301,6 +309,7 @@ impl UiColors {
             search: mix(bg, yellow, 0.45),
             hint_bg,
             hint_fg: on(hint_bg),
+            link: readable(blue, bg, TEXT_CONTRAST),
             group: [hue(blue), hue(green), hue(magenta), gold, hue(cyan), amber],
         }
     }
@@ -470,6 +479,25 @@ mod tests {
                 [c.hint_bg.r(), c.hint_bg.g(), c.hint_bg.b()],
             );
             assert!(ratio >= 4.5, "{}: hint text only {ratio:.2}", t.name);
+        }
+    }
+
+    /// Link text is painted on the **grid**, not on a chrome surface, and it is running text a
+    /// user reads — so it is measured against the terminal background at the full AA floor,
+    /// not the large-text one the chips get.
+    #[test]
+    fn link_text_is_readable_on_the_terminal_background() {
+        for t in themes::THEMES {
+            let c = UiColors::from_scheme(&t.resolve());
+            let ratio = themes::contrast(
+                [c.link.r(), c.link.g(), c.link.b()],
+                [c.bg.r(), c.bg.g(), c.bg.b()],
+            );
+            assert!(
+                ratio >= TEXT_CONTRAST - 0.01,
+                "{}: link text only {ratio:.2} on the grid",
+                t.name
+            );
         }
     }
 
