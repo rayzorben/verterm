@@ -83,6 +83,11 @@ Requires a Wayland (or X11) session with Vulkan drivers, fontconfig (`fc-match`)
   abbreviations (probed once per shell, local tabs only), the previous command with its exit code and a short
   excerpt of its output, and — when you had text selected — that selection, which `Ctrl+S` toggles off.
   After a suggestion you ran fails, `Ctrl+R` re-asks the same question with the failure attached.
+- **BBS mode** for telnet BBSes and MUDs: the tab decodes code page 437 (box drawing instead of `□`)
+  and treats `ESC[2J` as ANSI.SYS does, clearing *and* homing the cursor, so frames and the fields
+  drawn into them line up. It switches on by itself while `telnet` is the foreground job
+  (`bbs_auto_telnet`), and `Ctrl+Shift+B` toggles it for anything else (telnet inside ssh, `nc`); a
+  `bbs cp437` chip in the status bar shows it is on. Typed text is sent as CP437 too.
 - **Command palette** (`Ctrl+Shift+P`), scratchpad prompt (`Ctrl+Shift+E`), font zoom, status bar.
 
 ## Default keybindings
@@ -94,7 +99,7 @@ Requires a Wayland (or X11) session with Vulkan drivers, fontconfig (`fc-match`)
 | `Alt+Shift+J` / `Alt+Shift+K` | move tab to next / previous group | `Ctrl+Space`, `Super+K` | AI command prompt |
 | `Alt+G` | fold / unfold current group | `Ctrl+Shift+T` / `Ctrl+Shift+W` | new / close tab |
 | `Alt+H` / `Alt+L` | collapse (twice: bucket) / expand | `Ctrl+Shift+E` | new scratchpad tab |
-| `Alt+F` | find a session (name, cwd, host, or its output) | | |
+| `Alt+F` | find a session (name, cwd, host, or its output) | `Ctrl+Shift+B` | BBS mode for this tab (CP437) |
 | `Shift+PageUp/PageDown/End` | scroll | `Ctrl+Shift+P` | command palette |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | copy / paste (fixed) | `Ctrl+Shift+=` / `-` / `0` | font size |
 
@@ -114,8 +119,8 @@ rail opens a new tab.
 
 | Section | Keys |
 |---|---|
-| `[general]` | `shell`, `scrollback`, `rail_side`, `rail_width`, `rail_visible`, `show_icon`, `shell_integration`, `status_bar`, `cursor_blink`, `term`, `close_on_exit`, `scan_interval_ms` |
-| `[font]` | `family` (list, first fontconfig match wins), `ui_family` (proportional face for the chrome), `size`, `line_height` |
+| `[general]` | `shell`, `scrollback`, `rail_side`, `rail_width`, `rail_visible`, `show_icon`, `shell_integration`, `status_bar`, `cursor_blink`, `term`, `close_on_exit`, `scan_interval_ms`, `bbs_auto_telnet` |
+| `[font]` | `family` (list, first fontconfig match wins), `ui_family` (proportional face for the status bar and overlays), `rail_family` (tab rail face; empty = the terminal font), `size`, `line_height` |
 | `[ai]` | `enabled`, `endpoint` (`https://orohost:11434`), `model`, `stream`, `temperature`, `insecure_tls`, `timeout_secs`, `context_lines`, `position` (`bottom-right` \| `bottom-left` \| `top-right` \| `top-left` \| `center` \| `prompt`), `system_prompt` |
 | `[notifications]` | `enabled`, `threshold_secs`, `on_bell`, `timeout_ms` |
 | `[hyperlinks]` | `enabled`, `activate` (`click` \| `ctrl-click` \| `none`), `underline` / `color` (`always` \| `hover` \| `never`), `detect`, `detect_www`, `detect_emails`, `schemes` (the allowlist — a scheme not listed is never opened), `opener` (argv; the URI is appended) |
@@ -124,7 +129,7 @@ rail opens a new tab.
 
 ### Themes
 `theme = "<name>"` under `[colors]` restyles the **whole client**, not just the grid: the rail's
-surfaces, borders, badges, gauges and per-group bands are all derived from the scheme's sixteen ANSI
+surfaces, borders, badges, gauges and section boxes are all derived from the scheme's sixteen ANSI
 colours, and a light background flips the chrome to a light treatment on its own.
 
 | | |

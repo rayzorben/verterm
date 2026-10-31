@@ -35,6 +35,8 @@ pub enum Action {
     ScrollPageDown,
     ScrollToBottom,
     ClearScrollback,
+    /// Per-tab BBS mode: decode CP437 and home the cursor on clear screen (see `crate::bbs`).
+    ToggleBbsMode,
     Quit,
 }
 
@@ -67,6 +69,7 @@ impl Action {
             Action::ScrollPageDown => "scroll_page_down".into(),
             Action::ScrollToBottom => "scroll_to_bottom".into(),
             Action::ClearScrollback => "clear_scrollback".into(),
+            Action::ToggleBbsMode => "toggle_bbs_mode".into(),
             Action::Quit => "quit".into(),
         }
     }
@@ -98,6 +101,7 @@ impl Action {
             Action::ScrollPageDown => "Scroll page down".into(),
             Action::ScrollToBottom => "Scroll to bottom".into(),
             Action::ClearScrollback => "Clear scrollback".into(),
+            Action::ToggleBbsMode => "Toggle BBS mode (CP437)".into(),
             Action::Quit => "Quit verterm".into(),
         }
     }
@@ -128,6 +132,7 @@ impl Action {
             Action::ScrollPageDown,
             Action::ScrollToBottom,
             Action::ClearScrollback,
+            Action::ToggleBbsMode,
             Action::Quit,
         ];
         v.extend((1..=9).map(Action::SelectTab));
@@ -359,6 +364,7 @@ impl Keymap {
             (Chord::new(Key::PageUp).shift(), ScrollPageUp),
             (Chord::new(Key::PageDown).shift(), ScrollPageDown),
             (Chord::new(Key::End).shift(), ScrollToBottom),
+            (Chord::new(Key::B).ctrl().shift(), ToggleBbsMode),
         ];
         let digits = [
             Key::Num1,
@@ -424,6 +430,19 @@ impl Keymap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toggle_bbs_mode_has_a_default_chord_and_a_stable_name() {
+        let km = Keymap::defaults();
+        assert_eq!(
+            km.lookup(Chord::new(Key::B).ctrl().shift()),
+            Some(Action::ToggleBbsMode)
+        );
+        assert_eq!(
+            Action::from_name("toggle_bbs_mode"),
+            Some(Action::ToggleBbsMode)
+        );
+    }
 
     #[test]
     fn find_session_has_a_default_chord_and_a_stable_name() {

@@ -108,6 +108,8 @@ pub struct General {
     pub term: String,
     pub close_on_exit: bool,
     pub scan_interval_ms: u64,
+    /// Switch a tab to BBS mode (CP437, ANSI.SYS clear screen) while telnet is in the foreground.
+    pub bbs_auto_telnet: bool,
 }
 
 impl Default for General {
@@ -125,6 +127,7 @@ impl Default for General {
             term: "xterm-256color".into(),
             close_on_exit: true,
             scan_interval_ms: 500,
+            bbs_auto_telnet: true,
         }
     }
 }
@@ -133,8 +136,10 @@ impl Default for General {
 #[serde(default, deny_unknown_fields)]
 pub struct Font {
     pub family: Vec<String>,
-    /// Proportional family used for the chrome (rail, status bar, overlays).
+    /// Proportional family used for the chrome (status bar, overlays).
     pub ui_family: Vec<String>,
+    /// Family for the tab rail. Empty means the rail uses the terminal's own `family`.
+    pub rail_family: Vec<String>,
     pub size: f32,
     pub line_height: f32,
 }
@@ -156,6 +161,7 @@ impl Default for Font {
                 "DejaVu Sans".into(),
                 "sans-serif".into(),
             ],
+            rail_family: Vec::new(),
             size: 13.0,
             line_height: 1.0,
         }
@@ -621,6 +627,7 @@ mod tests {
         );
         assert_eq!(cfg.colors.resolve(), def.colors.resolve());
         assert_eq!(cfg.font.ui_family, def.font.ui_family);
+        assert_eq!(cfg.font.rail_family, def.font.rail_family);
         assert_eq!(
             cfg.hyperlinks, def.hyperlinks,
             "config.example.toml [hyperlinks] must equal Hyperlinks::default()"

@@ -63,6 +63,17 @@ impl Typography {
             mono_small: fonts.id((base - 2.5).max(7.0), false, false),
         }
     }
+
+    /// The same scale set in the tab rail's face (`[font].rail_family`, else the terminal's).
+    pub fn rail(fonts: &TermFonts, base: f32) -> Self {
+        Self {
+            ui: fonts.rail_id(base, false),
+            strong: fonts.rail_id(base, true),
+            small: fonts.rail_id((base - 2.0).max(8.0), false),
+            micro: fonts.rail_id((base - 3.0).max(7.0), true),
+            ..Self::new(fonts, base)
+        }
+    }
 }
 
 /// Frame for a floating surface: filled, hairlined, rounded and shadowed.

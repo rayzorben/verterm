@@ -1,7 +1,8 @@
 //! Font discovery through fontconfig (`fc-match`) and registration with egui. Two faces are
 //! resolved: the user's Nerd Font (regular/bold/italic/bold-italic) for the grid, placed ahead
 //! of egui's built-in monospace fonts so any glyph the primary face lacks still renders, and a
-//! proportional family for the chrome (rail, status bar, overlays).
+//! proportional family for the chrome (status bar, overlays). The tab rail uses the terminal
+//! face unless `[font].rail_family` names its own.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -21,6 +22,9 @@ pub struct TermFonts {
     pub ui: FontFamily,
     /// Bold cut of the chrome face (falls back to `ui` when the family has no bold).
     pub ui_bold: FontFamily,
+    /// Tab rail face and its strong cut.
+    pub rail: FontFamily,
+    pub rail_bold: FontFamily,
     /// Human description for the status line / logs.
     pub description: String,
 }
@@ -29,6 +33,12 @@ impl TermFonts {
     /// Chrome text: proportional, optionally the bold cut.
     pub fn ui_id(&self, size: f32, strong: bool) -> FontId {
         let family = if strong { &self.ui_bold } else { &self.ui };
+        FontId::new(size, family.clone())
+    }
+
+    /// Tab rail text, optionally the strong cut.
+    pub fn rail_id(&self, size: f32, strong: bool) -> FontId {
+        let family = if strong { &self.rail_bold } else { &self.rail };
         FontId::new(size, family.clone())
     }
 
@@ -165,11 +175,30 @@ pub fn install(ctx: &egui::Context, cfg: &config::Font) -> TermFonts {
         }
     };
 
+    // Rail face, when it is configured apart from the terminal's. Same Medium-first ladder as
+    // the chrome face.
+    let rail_own = resolve_first(&cfg.rail_family).map(|(fam, file, bytes)| {
+        let rail = register(&mut defs, "verterm-rail", bytes, &prop_fallback);
+        let mut chain = vec!["verterm-rail".to_string()];
+        chain.extend_from_slice(&prop_fallback);
+        let strong = ["Medium", "SemiBold", "Bold"]
+            .iter()
+            .find_map(|style| load_variant(&fam, style, Some(&file)))
+            .map(|(_, b)| register(&mut defs, "verterm-rail-strong", b, &chain))
+            .unwrap_or_else(|| rail.clone());
+        tracing::info!(font = %fam, "rail font loaded");
+        (rail, strong)
+    });
+    if rail_own.is_none() && !cfg.rail_family.is_empty() {
+        tracing::warn!("no configured rail_family resolved via fc-match; using the terminal font");
+    }
+
     let Some((fam, regular_file, regular_bytes)) = resolve_first(&cfg.family) else {
         tracing::warn!(
             "no configured font family resolved via fc-match; using egui's built-in monospace"
         );
         ctx.set_fonts(defs);
+        let (rail, rail_bold) = rail_own.unwrap_or((FontFamily::Monospace, FontFamily::Monospace));
         return TermFonts {
             regular: FontFamily::Monospace,
             bold: FontFamily::Monospace,
@@ -177,6 +206,8 @@ pub fn install(ctx: &egui::Context, cfg: &config::Font) -> TermFonts {
             bold_italic: FontFamily::Monospace,
             ui: ui_family,
             ui_bold: ui_bold_family,
+            rail,
+            rail_bold,
             description: "egui built-in monospace".into(),
         };
     };
@@ -209,6 +240,9 @@ pub fn install(ctx: &egui::Context, cfg: &config::Font) -> TermFonts {
 
     ctx.set_fonts(defs);
     tracing::info!(font = %fam, file = %regular_file.display(), "terminal font loaded");
+    // Unless configured otherwise the rail speaks the terminal's face, bold for its strong cut.
+    let (rail, rail_bold) =
+        rail_own.unwrap_or_else(|| (regular_family.clone(), bold_family.clone()));
     TermFonts {
         regular: regular_family,
         bold: bold_family,
@@ -216,6 +250,8 @@ pub fn install(ctx: &egui::Context, cfg: &config::Font) -> TermFonts {
         bold_italic: bold_italic_family,
         ui: ui_family,
         ui_bold: ui_bold_family,
+        rail,
+        rail_bold,
         description: fam,
     }
 }

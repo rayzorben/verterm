@@ -496,7 +496,9 @@ impl App {
         self.colors = UiColors::from_scheme(&scheme);
         ctx.set_visuals(theme::visuals(&self.colors));
 
-        if cfg.font.family != self.cfg.font.family || cfg.font.ui_family != self.cfg.font.ui_family
+        if cfg.font.family != self.cfg.font.family
+            || cfg.font.ui_family != self.cfg.font.ui_family
+            || cfg.font.rail_family != self.cfg.font.rail_family
         {
             self.term_fonts = fonts::install(ctx, &cfg.font);
             tracing::info!(font = %self.term_fonts.description, "terminal font family reloaded");
@@ -589,6 +591,7 @@ impl App {
             scrollback: self.cfg.general.scrollback,
             term_env: self.cfg.general.term.clone(),
             integration: self.integration.clone(),
+            bbs_auto_telnet: self.cfg.general.bbs_auto_telnet,
         };
         match Session::spawn(
             id,
@@ -1004,6 +1007,16 @@ impl App {
             Action::ScrollPageDown => self.with_active_term(|t| t.scroll_display(Scroll::PageDown)),
             Action::ScrollToBottom => self.with_active_term(|t| t.scroll_display(Scroll::Bottom)),
             Action::ClearScrollback => self.with_active_term(|t| t.grid_mut().clear_history()),
+            Action::ToggleBbsMode => {
+                if let Some(idx) = self.active_index() {
+                    let on = self.sessions[idx].shared.toggle_bbs_mode();
+                    self.toast(if on {
+                        "BBS mode on: CP437, clear screen homes the cursor"
+                    } else {
+                        "BBS mode off"
+                    });
+                }
+            }
             Action::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
         }
     }
@@ -1996,6 +2009,11 @@ impl App {
         Typography::new(&self.term_fonts, (self.font_size - 0.5).clamp(9.0, 20.0))
     }
 
+    /// The type scale in the rail's face.
+    fn rail_typography(&self) -> Typography {
+        Typography::rail(&self.term_fonts, (self.font_size - 0.5).clamp(9.0, 20.0))
+    }
+
     /// Rows for an active query: sessions matched by identity first, then sessions matched by
     /// what their scrollback contains.
     ///
@@ -2051,6 +2069,7 @@ impl App {
                 count: identity.len(),
                 elevated: false,
                 tint: self.colors.accent,
+                summary: Vec::new(),
             });
             for (_, s) in identity {
                 rows.push(mark(self.tab_row(s, index_of(s.id))));
@@ -2065,6 +2084,7 @@ impl App {
                 count: content.len(),
                 elevated: false,
                 tint: self.colors.gold,
+                summary: Vec::new(),
             });
             for (hit, s) in content {
                 let mut row = self.tab_row(s, index_of(s.id));
@@ -2079,7 +2099,6 @@ impl App {
     }
 
     fn build_rows(&self, tree: &TabTree, ordered: &[TabId]) -> Vec<Row> {
-        let icon_for = |key: &str| group_icon(key);
         let mut rows = Vec::new();
         for b in &tree.buckets {
             let bkey = b.bucket.key().to_string();
@@ -2093,6 +2112,17 @@ impl App {
                 count: b.groups.iter().map(|g| g.tabs.len()).sum(),
                 elevated,
                 tint: bucket_tint(b.bucket, &self.colors),
+                // A collapsed box keeps one dot per session on its header.
+                summary: if collapsed_b {
+                    b.groups
+                        .iter()
+                        .flat_map(|g| &g.tabs)
+                        .filter_map(|id| self.session(*id))
+                        .map(|s| tab_indicator(&s.shared.state.lock()))
+                        .collect()
+                } else {
+                    Vec::new()
+                },
             });
             if collapsed_b {
                 continue;
@@ -2102,10 +2132,8 @@ impl App {
                 rows.push(Row::Group {
                     key: g.key.clone(),
                     name: g.name.clone(),
-                    icon: icon_for(&g.key),
                     collapsed: collapsed_g,
                     count: g.tabs.len(),
-                    elevated,
                 });
                 if collapsed_g {
                     continue;
@@ -2128,17 +2156,7 @@ impl App {
     fn tab_row(&self, s: &Session, index: usize) -> TabRow {
         let st = s.shared.state.lock();
         let active = self.active == Some(s.id);
-        let indicator = if st.shell_exited.is_some() {
-            Indicator::Exited
-        } else if let Some(d) = st.running_for() {
-            Indicator::Running { since: d }
-        } else {
-            match st.last_exit_code {
-                Some(0) => Indicator::Success,
-                Some(c) => Indicator::Failure(c),
-                None => Indicator::Idle,
-            }
-        };
+        let indicator = tab_indicator(&st);
         let mut badges = Vec::new();
         match &st.category {
             ProcessCategory::RemoteSSH { target } => {
@@ -2156,12 +2174,9 @@ impl App {
                 self.colors.blue,
             )
         });
-        // The second line is noise on idle background tabs; show it where it means something.
-        let subtitle = if active || st.running_for().is_some() {
-            Some(format_footprint(&st, &s.program_label))
-        } else {
-            None
-        };
+        // Every other tab is one line: a running one shows its elapsed time and pulsing dot on
+        // that line instead, so the details are only spelled out for the tab you are in.
+        let subtitle = active.then(|| format_footprint(&st, &s.program_label));
         // Fraction of the whole machine. The denominator is fixed, so the bar is monotonic
         // in CPU: dividing by the cores the tree *happens* to span made it collapse every
         // time a process crossed a 100% boundary.
@@ -2419,6 +2434,9 @@ impl App {
                 chips.push(Chip::new(&p, "root", &ty.micro, c.vermilion))
             }
             ProcessCategory::Local => {}
+        }
+        if st.bbs_mode() {
+            chips.push(Chip::new(&p, "bbs cp437", &ty.micro, c.amber));
         }
         if let Some(git) = &st.git {
             chips.push(Chip::new(
@@ -2810,7 +2828,7 @@ impl eframe::App for App {
             } else {
                 self.build_rows(&tree, &ordered)
             };
-            let ty = self.typography();
+            let ty = self.rail_typography();
             let colors = self.colors;
             let frame = egui::Frame::NONE
                 .fill(colors.surface)
@@ -2946,6 +2964,21 @@ fn is_default_shell_title(t: &str) -> bool {
         // that the title *starts* with the `user@host` stamp and nothing else precedes it.
         && !user.contains('/')
         && !host.contains('/')
+}
+
+/// The lifecycle state a tab's dot shows.
+fn tab_indicator(st: &SessionState) -> Indicator {
+    if st.shell_exited.is_some() {
+        Indicator::Exited
+    } else if let Some(d) = st.running_for() {
+        Indicator::Running { since: d }
+    } else {
+        match st.last_exit_code {
+            Some(0) => Indicator::Success,
+            Some(c) => Indicator::Failure(c),
+            None => Indicator::Idle,
+        }
+    }
 }
 
 pub fn tab_title(st: &SessionState, fallback: &str) -> String {

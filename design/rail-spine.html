@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spine Rail</title>
+<style>
+:root {
+  --bg: #1b1e22;
+  --page: #131518;
+  --surface: #23272c;
+  --surface-hi: #2b3036;
+  --hairline: #2e3339;
+  --fg: #d8dee4;
+  --muted: #8b949e;
+  --faint: #5c646d;
+  --accent: #7fd1c1;
+  --accent-soft: rgba(127, 209, 193, 0.12);
+  --amber: #e5b567;
+  --green: #9fc37a;
+  --red: #e0707a;
+  --c-local: #7fd1c1;
+  --c-ssh: #e5b567;
+  --c-ctr: #7aa8d6;
+  --c-root: #e0707a;
+  --mono: "JetBrains Mono", "Iosevka", ui-monospace, monospace;
+  --sans: "Inter", "Noto Sans", system-ui, sans-serif;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f6f7f8; --page: #e9ebee; --surface: #eceef1; --surface-hi: #e2e5e9;
+    --hairline: #dadde2; --fg: #1f2328; --muted: #59636e; --faint: #9aa3ad;
+    --accent: #1f8f7c; --accent-soft: rgba(31, 143, 124, 0.12);
+    --amber: #b07a12; --green: #4f8a2a; --red: #c2414e;
+    --c-local: #1f8f7c; --c-ssh: #b07a12; --c-ctr: #2f6fb0; --c-root: #c2414e;
+  }
+}
+:root[data-theme="light"] {
+  --bg: #f6f7f8; --page: #e9ebee; --surface: #eceef1; --surface-hi: #e2e5e9;
+  --hairline: #dadde2; --fg: #1f2328; --muted: #59636e; --faint: #9aa3ad;
+  --accent: #1f8f7c; --accent-soft: rgba(31, 143, 124, 0.12);
+  --amber: #b07a12; --green: #4f8a2a; --red: #c2414e;
+  --c-local: #1f8f7c; --c-ssh: #b07a12; --c-ctr: #2f6fb0; --c-root: #c2414e;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--page); color: var(--fg);
+  font: 13px/1.4 var(--sans); -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1180px; margin: 0 auto; padding: 28px 16px 40px; }
+header { display: flex; gap: 16px; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; margin-bottom: 16px; }
+h1 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+header p { margin: 4px 0 0; color: var(--muted); max-width: 72ch; }
+.controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.seg { display: flex; gap: 2px; padding: 3px; border-radius: 9px; background: var(--surface); }
+.seg button {
+  border: 0; border-radius: 6px; padding: 5px 10px; background: transparent; color: var(--muted);
+  font: 12px var(--sans); cursor: pointer;
+}
+.seg button.on { background: var(--bg); color: var(--fg); box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+
+/* window */
+.win {
+  display: flex; height: 680px; background: var(--bg); border-radius: 12px; overflow: hidden;
+  border: 1px solid var(--hairline); box-shadow: 0 14px 40px rgba(0,0,0,.3);
+}
+.rail { width: 268px; flex: none; overflow-y: auto; overflow-x: hidden; user-select: none; scrollbar-width: none; padding-bottom: 12px; }
+.term {
+  flex: 1; min-width: 0; margin: 8px 8px 8px 0; background: var(--surface); border-radius: 8px;
+  padding: 14px; font: 12px/1.6 var(--mono); color: var(--faint); overflow: hidden; white-space: pre;
+}
+.term b { color: var(--accent); font-weight: 400; }
+.status {
+  display: flex; justify-content: space-between; padding: 6px 4px 0; color: var(--faint); font: 11px var(--mono);
+}
+
+svg.i { width: 14px; height: 14px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.6;
+  stroke-linecap: round; stroke-linejoin: round; }
+.dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.dot.ok { background: var(--green); }
+.dot.fail { background: var(--red); }
+.dot.running { background: var(--amber); animation: pulse 1.4s ease-in-out infinite; }
+.dot.idle { background: transparent; box-shadow: inset 0 0 0 1.5px var(--faint); }
+@keyframes pulse { 50% { opacity: .35; } }
+
+.search {
+  margin: 12px 10px 4px; display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+  border-radius: 8px; background: var(--surface); color: var(--faint);
+}
+.search kbd { margin-left: auto; font: 10px var(--mono); color: var(--faint); }
+
+/* ── the bucket box ── */
+.bucket {
+  --tint: 5%;
+  --edge: 16%;
+  margin: 10px 10px 0; padding: 2px 0 6px; border-radius: 11px;
+  background: color-mix(in srgb, var(--bcolor) var(--tint), var(--bg));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bcolor) var(--edge), transparent);
+}
+.bucket.root { --tint: 8%; --edge: 26%; }
+/* box style variants */
+.box-outline .bucket { background: transparent; --edge: 24%; }
+.box-outline .bucket.root { --edge: 38%; }
+.box-neutral .bucket { background: var(--surface); box-shadow: none; }
+.box-neutral .bucket.root { background: color-mix(in srgb, var(--c-root) 6%, var(--surface)); }
+
+.bhead {
+  display: flex; align-items: center; gap: 8px; padding: 9px 12px 5px 12px;
+  font-size: 11px; font-weight: 600; letter-spacing: .02em; color: var(--bcolor); cursor: pointer;
+}
+.bhead .n { margin-left: auto; color: var(--faint); font: 10.5px var(--mono); font-weight: 400; }
+.bhead .chev { width: 12px; height: 12px; color: var(--faint); transition: transform .15s; }
+.bucket.collapsed .bhead .chev { transform: rotate(-90deg); }
+.bucket.collapsed .kids-b { display: none; }
+.bucket.collapsed { padding-bottom: 2px; }
+/* when collapsed, summarise what's inside on the header */
+.bhead .sum { display: none; gap: 4px; }
+.bucket.collapsed .bhead .sum { display: flex; }
+
+/* ── the spine ── */
+.kids-b { position: relative; margin-left: 18px; }
+.kids-b::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 14px; width: 1.5px; border-radius: 2px;
+  background: color-mix(in srgb, var(--bcolor) 38%, transparent);
+}
+.ghead {
+  position: relative; display: flex; align-items: center; gap: 6px; padding: 6px 10px 2px 13px;
+  font-size: 12px; color: var(--muted); cursor: pointer;
+}
+.ghead::before {
+  content: ""; position: absolute; left: -3px; top: 11px; width: 7.5px; height: 7.5px; border-radius: 50%;
+  background: color-mix(in srgb, var(--bcolor) var(--tint), var(--bg)); box-shadow: inset 0 0 0 1.5px var(--bcolor);
+}
+.box-outline .ghead::before { background: var(--bg); }
+.box-neutral .ghead::before { background: var(--surface); }
+.group.collapsed .ghead::before { background: var(--bcolor); }
+.ghead .git { font: 10px var(--mono); color: var(--faint); }
+.ghead .n { margin-left: auto; font: 10px var(--mono); color: var(--faint); opacity: 0; }
+.group.collapsed .ghead .n, .ghead:hover .n { opacity: 1; }
+.group.collapsed .kids { display: none; }
+
+.tab {
+  position: relative; display: flex; align-items: center; gap: 8px; margin: 1px 8px 1px 13px; padding: 5px 8px;
+  border-radius: 6px; color: var(--muted); cursor: pointer;
+}
+.tab::before {
+  content: ""; position: absolute; left: -13px; top: 50%; width: 9px; height: 1.5px;
+  background: color-mix(in srgb, var(--bcolor) 38%, transparent);
+}
+.tab:hover { background: color-mix(in srgb, var(--fg) 5%, transparent); }
+.tab.active { background: var(--surface-hi); color: var(--fg); box-shadow: 0 1px 2px rgba(0,0,0,.18); }
+.box-neutral .tab.active { background: var(--bg); }
+.tab.active::before { background: var(--accent); height: 2px; }
+.tab .ix { font: 10px var(--mono); color: var(--faint); width: 8px; }
+.tab.active .ix { color: var(--accent); }
+.tab .t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tab .t small { color: var(--faint); font-size: 12px; }
+.tab .x { font: 10px var(--mono); color: var(--red); }
+.tab .tm { font: 10px var(--mono); color: var(--faint); }
+.tab.root .t { color: var(--c-root); }
+.tab .bell { color: var(--amber); display: flex; }
+/* details line under the active tab only */
+.tab .meta { display: none; }
+.tab.active { flex-wrap: wrap; row-gap: 0; }
+.tab.active .meta { display: block; width: 100%; padding-left: 16px; font-size: 11px; color: var(--faint); }
+
+.notes { margin-top: 18px; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 14px; }
+.notes div { background: var(--bg); border: 1px solid var(--hairline); border-radius: 10px; padding: 12px 14px; }
+.notes h3 { margin: 0 0 4px; font-size: 12.5px; }
+.notes p { margin: 0; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Spine, boxed</h1>
+      <p>Each section (Local, Remote, Containers, Elevated) is its own rounded box with its colored spine inside. Click a tab to make it active. Click a section or group heading to collapse it.</p>
+    </div>
+    <div class="controls">
+      <div class="seg" id="boxstyle">
+        <button data-v="box-tinted" class="on">Tinted</button>
+        <button data-v="box-outline">Outline</button>
+        <button data-v="box-neutral">Neutral</button>
+      </div>
+      <div class="seg" id="theme">
+        <button data-v="dark">Dark</button>
+        <button data-v="light">Light</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="win box-tinted" id="win">
+    <nav class="rail" id="rail"></nav>
+    <div class="term"><b>~/Dropbox/PC/develop/mudengine</b> ❯ cargo build
+   Compiling mudengine v0.4.0
+   Compiling tokio v1.48.0
+    Building [==========>      ] 212/298: serde_json
+
+<b>~</b> ❯ fastfetch
+OS: CachyOS x86_64
+Kernel: Linux 7.2.7-1-cachyos
+WM: niri 26.04 (Wayland)
+Terminal: verterm 0.4.0
+
+<b>~</b> ❯ █</div>
+  </div>
+
+  <div class="notes">
+    <div><h3>Section box</h3><p>One rounded box per section, tinted 5% with its color and a 1px edge at 16%. Elevated is a little stronger (8% / 26%) so root always stands out. No box for groups or tabs.</p></div>
+    <div><h3>Spine</h3><p>A 1.5px line in the section color runs down the box. Groups are hollow circles on it (filled when collapsed). Tabs branch off it, and the active tab's branch turns the accent color.</p></div>
+    <div><h3>Tabs</h3><p>One line: number, program, short path, status dot. Only the active tab gets a second line with details (process, memory, git branch, time).</p></div>
+    <div><h3>Collapsed section</h3><p>Collapsing a section keeps its status dots on the header, so you can still see a failure or a running job without opening it.</p></div>
+  </div>
+</div>
+
+<script>
+const ICON = {
+  home: '<path d="M3 7.5 8 3l5 4.5V13H3z"/><path d="M6.5 13V9.5h3V13"/>',
+  globe: '<circle cx="8" cy="8" r="5.5"/><path d="M2.5 8h11M8 2.5c1.8 1.6 1.8 9.4 0 11M8 2.5c-1.8 1.6-1.8 9.4 0 11"/>',
+  box: '<path d="M8 2.5 13.5 5.3v5.4L8 13.5 2.5 10.7V5.3z"/><path d="M2.5 5.3 8 8l5.5-2.7M8 8v5.5"/>',
+  shield: '<path d="M8 2.5 13 4.5v3.6c0 2.7-2.1 4.6-5 5.4-2.9-.8-5-2.7-5-5.4V4.5z"/>',
+  chev: '<path d="m4.5 6.5 3.5 3.5 3.5-3.5"/>',
+  search: '<circle cx="7" cy="7" r="4"/><path d="m10 10 3 3"/>',
+  bell: '<path d="M4.5 11V7.5a3.5 3.5 0 0 1 7 0V11l1 1h-9z"/><path d="M7 13.5h2"/>',
+};
+const ic = (n, cls = "i") => `<svg class="${cls}" viewBox="0 0 16 16">${ICON[n]}</svg>`;
+
+const BUCKETS = [
+  { id: "local", name: "Local", icon: "home", color: "var(--c-local)", groups: [
+    { name: "~", tabs: [
+      { n: 1, title: "fish", path: "~", meta: "fish · 11M", status: "idle" } ] },
+    { name: "mudengine", git: "main", tabs: [
+      { n: 2, title: "nvim", path: "…/mudengine/src", meta: "nvim · 214M · main", status: "ok" },
+      { n: 3, title: "cargo build", path: "…/mudengine", meta: "cargo · 1.2G · running 0:42", status: "running", time: "0:42" } ] },
+    { name: "verterm", git: "main*", tabs: [
+      { n: 4, title: "fish", path: "…/verterm", meta: "fish · 12M · main*", status: "ok", bell: true } ] } ] },
+  { id: "ssh", name: "Remote", icon: "globe", color: "var(--c-ssh)", groups: [
+    { name: "orohost", tabs: [
+      { n: 5, title: "fish", path: "~", meta: "ssh orohost · exited 1", status: "fail", exit: 1 } ] } ] },
+  { id: "ctr", name: "Containers", icon: "box", color: "var(--c-ctr)", groups: [
+    { name: "verterm", git: "distrobox", tabs: [
+      { n: 6, title: "fish", path: "~", meta: "distrobox · 34M", status: "idle" } ] } ] },
+  { id: "root", name: "Elevated", icon: "shield", color: "var(--c-root)", groups: [
+    { name: "root", tabs: [
+      { n: 7, title: "sudo top", path: "~", meta: "sudo · 19M", status: "running", root: true } ] } ] },
+];
+
+const state = { active: 1, collapsed: new Set() };
+const dot = t => `<span class="dot ${t.status}" title="${t.status}"></span>`;
+const tabsOf = b => b.groups.flatMap(g => g.tabs);
+
+function render() {
+  document.getElementById("rail").innerHTML = `
+    <div class="search">${ic("search")} find session or text… <kbd>/</kbd></div>
+    ${BUCKETS.map(b => `
+      <section class="bucket ${b.id === "root" ? "root" : ""} ${state.collapsed.has(b.id) ? "collapsed" : ""}" style="--bcolor:${b.color}">
+        <div class="bhead" data-toggle="${b.id}">
+          ${ic(b.icon)}${b.name}
+          <span class="n">${tabsOf(b).length}</span>
+          <span class="sum">${tabsOf(b).map(dot).join("")}</span>
+          ${ic("chev", "i chev")}
+        </div>
+        <div class="kids-b">${b.groups.map(g => `
+          <div class="group ${state.collapsed.has(b.id + "/" + g.name) ? "collapsed" : ""}">
+            <div class="ghead" data-toggle="${b.id}/${g.name}">${g.name}${g.git ? `<span class="git">${g.git}</span>` : ""}<span class="n">${g.tabs.length}</span></div>
+            <div class="kids">${g.tabs.map(t => `
+              <div class="tab ${t.n === state.active ? "active" : ""} ${t.root ? "root" : ""}" data-tab="${t.n}">
+                <span class="ix">${t.n}</span>
+                <span class="t">${t.title} <small>${t.path}</small></span>
+                ${t.bell ? `<span class="bell">${ic("bell")}</span>` : ""}
+                ${t.exit ? `<span class="x">✕${t.exit}</span>` : ""}
+                ${t.time ? `<span class="tm">${t.time}</span>` : ""}
+                ${dot(t)}
+                <span class="meta">${t.meta}</span>
+              </div>`).join("")}</div>
+          </div>`).join("")}</div>
+      </section>`).join("")}`;
+}
+
+document.getElementById("rail").addEventListener("click", e => {
+  const tab = e.target.closest("[data-tab]");
+  const tog = e.target.closest("[data-toggle]");
+  if (tab) state.active = +tab.dataset.tab;
+  else if (tog) {
+    const k = tog.dataset.toggle;
+    state.collapsed.has(k) ? state.collapsed.delete(k) : state.collapsed.add(k);
+  } else return;
+  render();
+});
+
+function seg(id, apply) {
+  const el = document.getElementById(id);
+  el.addEventListener("click", e => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    el.querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+    apply(b.dataset.v);
+  });
+}
+seg("boxstyle", v => { document.getElementById("win").className = "win " + v; });
+seg("theme", v => { document.documentElement.dataset.theme = v; });
+const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+document.querySelector(`#theme [data-v="${dark ? "dark" : "light"}"]`).classList.add("on");
+
+render();
+</script>
+</body>
+</html>

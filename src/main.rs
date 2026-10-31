@@ -17,6 +17,7 @@
 //! - `ui`                eframe app: rail, terminal view, overlays, theme, fonts
 
 mod ai;
+mod bbs;
 mod config;
 mod hints;
 mod input;

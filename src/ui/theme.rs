@@ -2,7 +2,7 @@
 //! cube, 24 grey, named specials) and the chrome tokens used by the rail, badges and overlays.
 //!
 //! Only the sixteen ANSI colours and the four specials are ever configured. Everything else —
-//! the surface ladder, the borders, the badge hues, the rail's group tints — is *derived* here,
+//! the surface ladder, the borders, the badge hues — is *derived* here,
 //! and derived in whichever direction the background points: a light scheme sinks its surfaces
 //! toward ink where a dark one lifts them toward white. That is what lets a one-line
 //! `theme = "..."` restyle the whole client coherently instead of only the grid.
@@ -164,18 +164,10 @@ pub struct UiColors {
     /// floor (4.5) rather than the large-text one: this is running text a user reads, not a
     /// 12 px chip.
     pub link: Color32,
-    /// The hues a rail group is banded with, in the order they are handed out. Six is enough
-    /// that adjacent groups always differ (see `rail::group_tints`) without the rail turning
-    /// into a paint chart; they are the scheme's own chromatic ANSI colours, so the banding
-    /// belongs to whatever theme is loaded.
-    pub group: [Color32; GROUP_TINTS],
 }
 
-/// How many distinct group hues the rail rotates through.
-pub const GROUP_TINTS: usize = 6;
-
 /// Linear mix of two colours, `t` = 0 keeps `a`.
-fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     let c = |x: u8, y: u8| (x as f32 * (1.0 - t) + y as f32 * t).clamp(0.0, 255.0) as u8;
     Color32::from_rgb(c(a.r(), b.r()), c(a.g(), b.g()), c(a.b(), b.b()))
 }
@@ -270,7 +262,7 @@ impl UiColors {
         // not reliably the same hue — Solarized spends bright 2..5 on greys — so reading the
         // brights would give a grey "success" dot in any scheme that follows that convention.
         let (red, green, yellow) = (ansi(1), ansi(2), ansi(3));
-        let (blue, magenta, cyan) = (ansi(4), ansi(5), ansi(6));
+        let (blue, magenta) = (ansi(4), ansi(5));
         // Two warm accents that must stay apart: `gold` labels an ssh host, `amber` means a
         // command is running. Pulling amber toward red keeps them one glance apart in every
         // palette, which a shared yellow would not.
@@ -310,7 +302,6 @@ impl UiColors {
             hint_bg,
             hint_fg: on(hint_bg),
             link: readable(blue, bg, TEXT_CONTRAST),
-            group: [hue(blue), hue(green), hue(magenta), gold, hue(cyan), amber],
         }
     }
 }
@@ -418,14 +409,6 @@ mod tests {
                 assert!(
                     ratio >= ACCENT_CONTRAST - 0.01,
                     "{}: {what} only {ratio:.2} against surface",
-                    t.name
-                );
-            }
-            for (i, col) in c.group.iter().enumerate() {
-                let ratio = themes::contrast([col.r(), col.g(), col.b()], bg);
-                assert!(
-                    ratio >= ACCENT_CONTRAST - 0.01,
-                    "{}: group tint {i} only {ratio:.2}",
                     t.name
                 );
             }

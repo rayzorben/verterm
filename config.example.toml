@@ -15,12 +15,15 @@ cursor_blink = true
 term = "xterm-256color"       # value of $TERM inside the terminal
 close_on_exit = true          # close a tab when its shell exits
 scan_interval_ms = 500        # /proc scanner cadence
+bbs_auto_telnet = true        # BBS mode (CP437 + ANSI.SYS clear screen) while telnet is the foreground job
 
 [font]
 # First family that fontconfig resolves wins. "monospace" is a safe final fallback.
 family = ["LucidaProgrammer Nerd Font Mono", "MesloLGS Nerd Font Mono", "MesloLGS Nerd Font", "JetBrainsMono Nerd Font Mono", "monospace"]
-# Proportional family for the chrome (rail, status bar, overlays). "sans-serif" is the final fallback.
+# Proportional family for the chrome (status bar, overlays). "sans-serif" is the final fallback.
 ui_family = ["Inter", "Noto Sans", "Adwaita Sans", "Cantarell", "DejaVu Sans", "sans-serif"]
+# Family for the tab rail. Empty (the default) uses the terminal font above.
+rail_family = []
 size = 14.0
 line_height = 1.0
 
@@ -185,3 +188,4 @@ font_reset = "Ctrl+Shift+0"
 scroll_page_up = "Shift+PageUp"
 scroll_page_down = "Shift+PageDown"
 scroll_to_bottom = "Shift+End"
+toggle_bbs_mode = "Ctrl+Shift+B"  # CP437 + ANSI.SYS clear screen for this tab (BBS over telnet)

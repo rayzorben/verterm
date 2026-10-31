@@ -3,10 +3,10 @@
 //! rendering never blocks I/O and I/O never blocks rendering).
 
 use std::io::{Read, Write};
-use std::os::fd::BorrowedFd;
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -19,6 +19,7 @@ use anyhow::{Context, Result};
 use parking_lot::{FairMutex, Mutex};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+use crate::bbs::{self, BbsFilter};
 use crate::osc::{OscEvent, OscMark, OscTap};
 use crate::procscan::{ScanRegistry, ScanTarget};
 use crate::shell_integration::ShellIntegration;
@@ -129,6 +130,10 @@ pub struct SessionState {
     pub git: Option<GitInfo>,
     /// `Some(code)` once the shell process has exited.
     pub shell_exited: Option<Option<i32>>,
+    /// A telnet client is the foreground job (and `bbs_auto_telnet` is on): BBS mode by default.
+    pub bbs_auto: bool,
+    /// The user's toggle; wins over `bbs_auto` until the foreground job next changes kind.
+    pub bbs_override: Option<bool>,
 }
 
 impl SessionState {
@@ -180,6 +185,10 @@ impl SessionState {
     pub fn running_for(&self) -> Option<Duration> {
         self.running.as_ref().map(|r| r.started_at.elapsed())
     }
+
+    pub fn bbs_mode(&self) -> bool {
+        self.bbs_override.unwrap_or(self.bbs_auto)
+    }
 }
 
 pub struct SessionShared {
@@ -193,11 +202,38 @@ pub struct SessionShared {
     /// second on an idle tab), so keying on this and not on the frame is the difference
     /// between scanning the screen 60 times a second and scanning it when it changes.
     grid_generation: AtomicU64,
+    /// Mirror of [`SessionState::bbs_mode`] for the reader thread and `Session::write`, which
+    /// consult it on every chunk and must not take the state lock to do it.
+    bbs: AtomicBool,
 }
 
 impl SessionShared {
     pub fn grid_generation(&self) -> u64 {
         self.grid_generation.load(Ordering::Relaxed)
+    }
+
+    pub fn bbs_mode(&self) -> bool {
+        self.bbs.load(Ordering::Relaxed)
+    }
+
+    /// Flip BBS mode by hand; returns the new setting.
+    pub fn toggle_bbs_mode(&self) -> bool {
+        let mut st = self.state.lock();
+        let on = !st.bbs_mode();
+        st.bbs_override = Some(on);
+        self.bbs.store(on, Ordering::Relaxed);
+        on
+    }
+
+    /// The foreground job started or stopped being a telnet client. A manual toggle only
+    /// lasts until then: it was a statement about the program that was running.
+    fn set_bbs_auto(&self, auto: bool) {
+        let mut st = self.state.lock();
+        if st.bbs_auto != auto {
+            st.bbs_auto = auto;
+            st.bbs_override = None;
+        }
+        self.bbs.store(st.bbs_mode(), Ordering::Relaxed);
     }
 }
 
@@ -290,6 +326,8 @@ pub struct SpawnRequest {
     pub scrollback: usize,
     pub term_env: String,
     pub integration: Option<Arc<ShellIntegration>>,
+    /// Turn BBS mode on while a telnet client is the foreground job.
+    pub bbs_auto_telnet: bool,
 }
 
 pub struct Session {
@@ -383,6 +421,7 @@ impl Session {
             shell_pid,
             state: Mutex::new(SessionState::default()),
             grid_generation: AtomicU64::new(0),
+            bbs: AtomicBool::new(false),
         });
         let size = Arc::new(Mutex::new(WindowSize {
             num_lines: rows,
@@ -423,21 +462,28 @@ impl Session {
             })
             .context("spawn writer thread")?;
 
-        // Reader thread: PTY → OSC tap → vte → Term, then wake the GUI.
+        let raw_fd = master.as_raw_fd().context("master fd")?;
+        let dup_master =
+            || nix::unistd::dup(unsafe { BorrowedFd::borrow_raw(raw_fd) }).context("dup master fd");
+
+        // Reader thread: PTY → (BBS filter) → OSC tap → vte → Term, then wake the GUI.
         {
             let term = term.clone();
             let shared = shared.clone();
             let ctx = ctx.clone();
+            let fg_fd = if req.bbs_auto_telnet {
+                Some(dup_master()?)
+            } else {
+                None
+            };
             thread::Builder::new()
                 .name(format!("pty-reader-{id}"))
-                .spawn(move || reader_loop(&mut *reader, term, shared, ctx))
+                .spawn(move || reader_loop(&mut *reader, term, shared, ctx, fg_fd))
                 .context("spawn reader thread")?;
         }
 
         // Scanner registration with an independent dup of the master fd (tcgetpgrp).
-        let raw_fd = master.as_raw_fd().context("master fd")?;
-        let scan_fd =
-            nix::unistd::dup(unsafe { BorrowedFd::borrow_raw(raw_fd) }).context("dup master fd")?;
+        let scan_fd = dup_master()?;
         registry.add(ScanTarget {
             id,
             shell_pid,
@@ -476,6 +522,11 @@ impl Session {
         if bytes.is_empty() {
             return;
         }
+        let bytes = if self.shared.bbs_mode() {
+            bbs::encode_cp437(&bytes)
+        } else {
+            bytes
+        };
         let _ = self.writer.send(bytes);
     }
 
@@ -569,10 +620,14 @@ fn reader_loop(
     term: Arc<FairMutex<Term<EventProxy>>>,
     shared: Arc<SessionShared>,
     ctx: egui::Context,
+    fg_fd: Option<OwnedFd>,
 ) {
     let mut processor: Processor = Processor::new();
     let mut tap = OscTap::new();
+    let mut bbs_filter = BbsFilter::new();
+    let mut fg_pgrp: Option<i32> = None;
     let mut buf = vec![0u8; 64 * 1024];
+    let mut transcoded = Vec::with_capacity(64 * 1024);
     let mut filtered = Vec::with_capacity(64 * 1024);
     let mut events: Vec<OscMark> = Vec::new();
     let mut positioned: Vec<(OscEvent, GridPos)> = Vec::new();
@@ -584,9 +639,32 @@ fn reader_loop(
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         };
+        // Telnet detection happens here rather than in the 500 ms scanner: a BBS sends its
+        // first screen straight after connecting, and a mode switch that lands a tick later
+        // has already let that screen through as UTF-8. `tcgetpgrp` is one ioctl per read;
+        // `/proc` is read only when the foreground group changes.
+        if let Some(fd) = &fg_fd {
+            let pgrp = nix::unistd::tcgetpgrp(fd).ok().map(|p| p.as_raw());
+            if pgrp != fg_pgrp {
+                fg_pgrp = pgrp;
+                shared.set_bbs_auto(pgrp.is_some_and(|pg| {
+                    std::fs::read_to_string(format!("/proc/{pg}/comm"))
+                        .is_ok_and(|comm| bbs::is_telnet_comm(&comm))
+                }));
+            }
+        }
+        let input = if shared.bbs_mode() {
+            transcoded.clear();
+            bbs_filter.process(&buf[..n], &mut transcoded);
+            &transcoded[..]
+        } else {
+            bbs_filter.reset();
+            &buf[..n]
+        };
+
         filtered.clear();
         events.clear();
-        tap.process(&buf[..n], &mut filtered, &mut events);
+        tap.process(input, &mut filtered, &mut events);
 
         positioned.clear();
         {

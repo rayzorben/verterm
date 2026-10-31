@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rail Prototypes</title>
+<style>
+:root {
+  --bg: #1b1e22;
+  --page: #131518;
+  --surface: #23272c;
+  --surface-hi: #2b3036;
+  --hairline: #2e3339;
+  --fg: #d8dee4;
+  --muted: #8b949e;
+  --faint: #5c646d;
+  --accent: #7fd1c1;
+  --accent-soft: rgba(127, 209, 193, 0.12);
+  --amber: #e5b567;
+  --green: #9fc37a;
+  --red: #e0707a;
+  --c-local: #7fd1c1;
+  --c-ssh: #e5b567;
+  --c-ctr: #7aa8d6;
+  --c-root: #e0707a;
+  --mono: "JetBrains Mono", "Iosevka", ui-monospace, monospace;
+  --sans: "Inter", "Noto Sans", system-ui, sans-serif;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f6f7f8; --page: #e9ebee; --surface: #eceef1; --surface-hi: #e2e5e9;
+    --hairline: #dadde2; --fg: #1f2328; --muted: #59636e; --faint: #9aa3ad;
+    --accent: #1f8f7c; --accent-soft: rgba(31, 143, 124, 0.12);
+    --amber: #b07a12; --green: #4f8a2a; --red: #c2414e;
+    --c-local: #1f8f7c; --c-ssh: #b07a12; --c-ctr: #2f6fb0; --c-root: #c2414e;
+  }
+}
+:root[data-theme="light"] {
+  --bg: #f6f7f8; --page: #e9ebee; --surface: #eceef1; --surface-hi: #e2e5e9;
+  --hairline: #dadde2; --fg: #1f2328; --muted: #59636e; --faint: #9aa3ad;
+  --accent: #1f8f7c; --accent-soft: rgba(31, 143, 124, 0.12);
+  --amber: #b07a12; --green: #4f8a2a; --red: #c2414e;
+  --c-local: #1f8f7c; --c-ssh: #b07a12; --c-ctr: #2f6fb0; --c-root: #c2414e;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--page); color: var(--fg);
+  font: 13px/1.4 var(--sans); -webkit-font-smoothing: antialiased;
+}
+header.page {
+  max-width: 1500px; margin: 0 auto; padding: 28px 16px 8px;
+  display: flex; gap: 16px; align-items: flex-end; justify-content: space-between; flex-wrap: wrap;
+}
+header.page h1 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+header.page p { margin: 4px 0 0; color: var(--muted); max-width: 70ch; }
+.theme-btn {
+  background: var(--surface); color: var(--fg); border: 1px solid var(--hairline);
+  border-radius: 8px; padding: 6px 12px; font: inherit; cursor: pointer;
+}
+main {
+  max-width: 1500px; margin: 0 auto; padding: 16px;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 440px), 1fr)); gap: 20px;
+}
+.proto { display: flex; flex-direction: column; gap: 10px; }
+.proto h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.proto h2 span { color: var(--faint); font-weight: 500; margin-right: 6px; font-family: var(--mono); }
+.proto ul.notes { margin: 0; padding-left: 18px; color: var(--muted); }
+.proto ul.notes li { margin: 2px 0; }
+
+/* window frame: rail + a sliver of terminal for context */
+.win {
+  display: flex; height: 600px; background: var(--bg); border-radius: 12px; overflow: hidden;
+  border: 1px solid var(--hairline); box-shadow: 0 10px 30px rgba(0,0,0,.25);
+}
+.rail { width: 256px; flex: none; overflow-y: auto; overflow-x: hidden; user-select: none; scrollbar-width: none; }
+.term {
+  flex: 1; min-width: 0; margin: 8px 8px 8px 0; background: var(--surface); border-radius: 8px;
+  padding: 12px; font: 11px/1.6 var(--mono); color: var(--faint); overflow: hidden; white-space: pre;
+}
+.term b { color: var(--accent); font-weight: 400; }
+
+svg.i { width: 14px; height: 14px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.6;
+  stroke-linecap: round; stroke-linejoin: round; }
+.mono { font-family: var(--mono); }
+.dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--faint); }
+.dot.ok { background: var(--green); }
+.dot.fail { background: var(--red); }
+.dot.running { background: var(--amber); animation: pulse 1.4s ease-in-out infinite; }
+.dot.idle { background: transparent; box-shadow: inset 0 0 0 1.5px var(--faint); }
+@keyframes pulse { 50% { opacity: .35; } }
+.search {
+  margin: 12px 12px 10px; display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+  border-radius: 8px; background: var(--surface); color: var(--faint);
+}
+.search kbd { margin-left: auto; font: 10px var(--mono); color: var(--faint); }
+.collapsed > .kids { display: none; }
+.chev { transition: transform .15s; }
+.collapsed .chev { transform: rotate(-90deg); }
+[data-tab] { cursor: pointer; }
+[data-group-toggle] { cursor: pointer; }
+
+/* ───────────── 1 · Hairline ───────────── */
+.v1 .bucket { padding: 4px 0 10px; }
+.v1 .bucket + .bucket { border-top: 1px solid var(--hairline); padding-top: 10px; }
+.v1 .bhead {
+  display: flex; align-items: center; gap: 8px; padding: 4px 16px 6px;
+  font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--faint);
+}
+.v1 .bhead .sw { width: 6px; height: 6px; border-radius: 2px; }
+.v1 .bhead .n { margin-left: auto; font-family: var(--mono); font-weight: 400; letter-spacing: 0; }
+.v1 .ghead {
+  display: flex; align-items: center; gap: 6px; padding: 5px 16px 3px; color: var(--muted); font-size: 12px;
+}
+.v1 .ghead .chev { opacity: 0; width: 12px; height: 12px; margin-left: auto; }
+.v1 .ghead:hover .chev, .v1 .collapsed .ghead .chev { opacity: 1; }
+.v1 .tab {
+  position: relative; display: flex; align-items: center; gap: 10px; margin: 1px 8px; padding: 6px 10px 6px 26px;
+  border-radius: 7px; color: var(--muted);
+}
+.v1 .tab:hover { background: var(--surface); }
+.v1 .tab .ix { position: absolute; left: 10px; font: 10px var(--mono); color: var(--faint); }
+.v1 .tab .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v1 .tab .t small { color: var(--faint); margin-left: 6px; font-size: 11.5px; }
+.v1 .tab .meta { display: none; }
+.v1 .tab.active { background: var(--accent-soft); color: var(--fg); flex-wrap: wrap; row-gap: 0; }
+.v1 .tab.active::before {
+  content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px; border-radius: 2px; background: var(--accent);
+}
+.v1 .tab.active .meta { display: block; width: 100%; font-size: 11px; color: var(--faint); padding-right: 17px; }
+.v1 .tab.root .t { color: var(--c-root); }
+.v1 .flag { font: 10px var(--mono); color: var(--red); }
+
+/* ───────────── 2 · Islands ───────────── */
+.v2 .rail { padding-bottom: 12px; }
+.v2 .blabel {
+  display: flex; align-items: center; gap: 6px; padding: 14px 18px 6px; font-size: 11px; color: var(--faint);
+  font-weight: 500;
+}
+.v2 .blabel svg { color: var(--bcolor); }
+.v2 .card {
+  margin: 0 10px 8px; background: var(--surface); border-radius: 10px; padding: 4px;
+  box-shadow: 0 1px 0 rgba(255,255,255,.03) inset, 0 1px 2px rgba(0,0,0,.18);
+}
+.v2 .card.root { background: color-mix(in srgb, var(--c-root) 9%, var(--surface)); }
+.v2 .ghead {
+  display: flex; align-items: center; gap: 7px; padding: 6px 8px 4px; font-size: 12px; font-weight: 600;
+}
+.v2 .ghead .n { margin-left: auto; color: var(--faint); font: 10.5px var(--mono); }
+.v2 .ghead svg { color: var(--bcolor); }
+.v2 .tab { display: grid; grid-template-columns: 1fr auto; gap: 0 8px; padding: 7px 8px; border-radius: 7px; }
+.v2 .tab:hover { background: var(--surface-hi); }
+.v2 .tab.active { background: var(--bg); box-shadow: 0 0 0 1px var(--hairline); }
+.v2 .tab .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+.v2 .tab.active .t { color: var(--fg); font-weight: 500; }
+.v2 .tab .right { display: flex; align-items: center; gap: 6px; font: 10px var(--mono); color: var(--faint); }
+.v2 .tab .meta { grid-column: 1 / -1; font-size: 11px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.v2 .pill { padding: 1px 6px; border-radius: 999px; font: 10px var(--mono); }
+.v2 .pill.fail { background: color-mix(in srgb, var(--red) 18%, transparent); color: var(--red); }
+.v2 .pill.root { background: color-mix(in srgb, var(--c-root) 18%, transparent); color: var(--c-root); }
+
+/* ───────────── 3 · Spine ───────────── */
+.v3 .rail { padding: 2px 0 12px; }
+.v3 .bucket { position: relative; padding: 6px 0 8px 0; }
+.v3 .bhead {
+  display: flex; align-items: center; gap: 8px; padding: 8px 16px 4px 14px;
+  font-size: 11px; font-weight: 600; color: var(--bcolor);
+}
+.v3 .bhead .n { margin-left: auto; color: var(--faint); font: 10.5px var(--mono); }
+.v3 .kids-b { position: relative; margin-left: 20px; }
+.v3 .kids-b::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 8px; width: 1.5px;
+  background: color-mix(in srgb, var(--bcolor) 35%, transparent); border-radius: 2px;
+}
+.v3 .ghead {
+  position: relative; display: flex; align-items: center; gap: 6px; padding: 6px 12px 2px 14px;
+  font-size: 12px; color: var(--muted);
+}
+.v3 .ghead::before {
+  content: ""; position: absolute; left: -3px; top: 12px; width: 7.5px; height: 7.5px; border-radius: 50%;
+  background: var(--bg); box-shadow: inset 0 0 0 1.5px var(--bcolor);
+}
+.v3 .tab {
+  position: relative; display: flex; align-items: center; gap: 8px; margin: 1px 10px 1px 14px; padding: 5px 8px;
+  border-radius: 6px; color: var(--muted);
+}
+.v3 .tab::before {
+  content: ""; position: absolute; left: -14px; top: 50%; width: 10px; height: 1.5px;
+  background: color-mix(in srgb, var(--bcolor) 35%, transparent);
+}
+.v3 .tab:hover { background: var(--surface); }
+.v3 .tab.active { background: var(--surface-hi); color: var(--fg); }
+.v3 .tab.active::before { background: var(--accent); height: 2px; }
+.v3 .tab .t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.v3 .tab .ix { font: 10px var(--mono); color: var(--faint); width: 8px; }
+.v3 .tab .x { font: 10px var(--mono); color: var(--red); }
+.v3 .tab.root { color: var(--c-root); }
+
+/* ───────────── 4 · Gutter ───────────── */
+.v4 .rail { padding: 0 0 12px; }
+.v4 .bucket { display: flex; margin: 8px 8px 0 0; }
+.v4 .gutter {
+  width: 26px; flex: none; display: flex; justify-content: center; position: relative;
+}
+.v4 .gutter::before {
+  content: ""; position: absolute; top: 4px; bottom: 4px; left: 11px; width: 3px; border-radius: 3px;
+  background: var(--bcolor); opacity: .55;
+}
+.v4 .gutter span {
+  writing-mode: vertical-rl; transform: rotate(180deg); position: relative; padding: 6px 0;
+  background: var(--bg); font-size: 9.5px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--bcolor); align-self: flex-start; margin-top: 4px;
+}
+.v4 .body { flex: 1; min-width: 0; padding-bottom: 6px; }
+.v4 .ghead {
+  display: flex; align-items: center; gap: 8px; padding: 6px 4px 2px; font-size: 10.5px; color: var(--faint);
+}
+.v4 .ghead::after { content: ""; flex: 1; height: 1px; background: var(--hairline); }
+.v4 .ghead .n { order: 3; font-family: var(--mono); }
+.v4 .tab {
+  display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; color: var(--muted);
+  font-size: 12.5px;
+}
+.v4 .tab:hover { background: var(--surface); }
+.v4 .tab.active { background: var(--surface-hi); color: var(--fg); }
+.v4 .tab .key {
+  width: 17px; height: 17px; display: grid; place-items: center; border-radius: 4px; flex: none;
+  font: 10px var(--mono); color: var(--faint); box-shadow: inset 0 0 0 1px var(--hairline);
+}
+.v4 .tab.active .key { background: var(--accent); color: var(--bg); box-shadow: none; }
+.v4 .tab .t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.v4 .tab .t small { color: var(--faint); }
+.v4 .tab .x { font: 10px var(--mono); color: var(--red); }
+.v4 .tab .mem { font: 10px var(--mono); color: var(--faint); }
+
+/* ───────────── 5 · Filtered ───────────── */
+.v5 .seg {
+  display: flex; gap: 2px; margin: 0 12px 10px; padding: 3px; border-radius: 9px; background: var(--surface);
+}
+.v5 .seg button {
+  flex: 1; display: flex; align-items: center; justify-content: center; gap: 4px; padding: 5px 0;
+  border: 0; border-radius: 6px; background: transparent; color: var(--faint); font: 11px var(--sans); cursor: pointer;
+}
+.v5 .seg button:hover { color: var(--fg); }
+.v5 .seg button.on { background: var(--bg); color: var(--fg); box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+.v5 .seg button svg { color: var(--bcolor, var(--muted)); }
+.v5 .seg button sup { font: 9px var(--mono); color: var(--faint); }
+.v5 .ghead {
+  display: flex; align-items: center; gap: 7px; padding: 10px 16px 4px; font-size: 11.5px; font-weight: 600; color: var(--fg);
+}
+.v5 .ghead svg { color: var(--bcolor); }
+.v5 .ghead .chev { margin-left: auto; color: var(--faint); width: 12px; height: 12px; }
+.v5 .ghead .host { color: var(--faint); font-weight: 400; }
+.v5 .tab {
+  position: relative; display: grid; grid-template-columns: 16px 1fr auto; gap: 0 8px; align-items: center;
+  margin: 0 8px; padding: 6px 8px; border-radius: 8px;
+}
+.v5 .tab:hover { background: var(--surface); }
+.v5 .tab.active { background: var(--accent-soft); }
+.v5 .tab .ix { font: 10px var(--mono); color: var(--faint); text-align: center; }
+.v5 .tab.active .ix { color: var(--accent); }
+.v5 .tab .t { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+.v5 .tab.active .t { color: var(--fg); }
+.v5 .tab .meta { grid-column: 2 / 4; font-size: 11px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.v5 .tab .st { display: flex; align-items: center; gap: 6px; font: 10px var(--mono); color: var(--faint); }
+.v5 .tab .st.fail { color: var(--red); }
+.v5 .tab .st.root { color: var(--c-root); }
+.v5 .tab.root::after {
+  content: ""; position: absolute; inset: 0; border-radius: 8px; pointer-events: none;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c-root) 40%, transparent);
+}
+.v5 .empty { padding: 20px 16px; color: var(--faint); text-align: center; }
+</style>
+</head>
+<body>
+<header class="page">
+  <div>
+    <h1>verterm · tab rail prototypes</h1>
+    <p>Five directions for the same seven sessions (local, SSH, container, root). Click a tab to make it active, click a group heading to collapse it. Tab 3 is running, tab 5 exited 1, tab 4 has a bell.</p>
+  </div>
+  <button class="theme-btn" id="theme">Toggle light / dark</button>
+</header>
+<main id="protos"></main>
+
+<script>
+const ICON = {
+  home: '<path d="M3 7.5 8 3l5 4.5V13H3z"/><path d="M6.5 13V9.5h3V13"/>',
+  folder: '<path d="M2.5 4.5h4l1.2 1.5h5.8v6.5h-11z"/>',
+  globe: '<circle cx="8" cy="8" r="5.5"/><path d="M2.5 8h11M8 2.5c1.8 1.6 1.8 9.4 0 11M8 2.5c-1.8 1.6-1.8 9.4 0 11"/>',
+  box: '<path d="M8 2.5 13.5 5.3v5.4L8 13.5 2.5 10.7V5.3z"/><path d="M2.5 5.3 8 8l5.5-2.7M8 8v5.5"/>',
+  shield: '<path d="M8 2.5 13 4.5v3.6c0 2.7-2.1 4.6-5 5.4-2.9-.8-5-2.7-5-5.4V4.5z"/>',
+  chev: '<path d="m4.5 6.5 3.5 3.5 3.5-3.5"/>',
+  search: '<circle cx="7" cy="7" r="4"/><path d="m10 10 3 3"/>',
+  bell: '<path d="M4.5 11V7.5a3.5 3.5 0 0 1 7 0V11l1 1h-9z"/><path d="M7 13.5h2"/>',
+};
+const ic = (n, cls = "i") => `<svg class="${cls}" viewBox="0 0 16 16">${ICON[n]}</svg>`;
+
+const BUCKETS = [
+  { id: "local", name: "Local", short: "Local", icon: "home", color: "var(--c-local)", groups: [
+    { name: "~", icon: "home", tabs: [
+      { n: 1, title: "fish", path: "~", meta: "fish · 11M", status: "idle" } ] },
+    { name: "mudengine", icon: "folder", git: "main", tabs: [
+      { n: 2, title: "nvim", path: "…/mudengine/src", meta: "nvim · 214M · main", status: "ok" },
+      { n: 3, title: "cargo build", path: "…/mudengine", meta: "cargo · 1.2G · 0:42", status: "running", time: "0:42" } ] },
+    { name: "verterm", icon: "folder", git: "main*", tabs: [
+      { n: 4, title: "fish", path: "…/verterm", meta: "fish · 12M · main*", status: "ok", bell: true } ] } ] },
+  { id: "ssh", name: "Remote", short: "SSH", icon: "globe", color: "var(--c-ssh)", groups: [
+    { name: "orohost", icon: "globe", tabs: [
+      { n: 5, title: "fish", path: "~", meta: "ssh · exited 1", status: "fail", exit: 1 } ] } ] },
+  { id: "ctr", name: "Containers", short: "Box", icon: "box", color: "var(--c-ctr)", groups: [
+    { name: "verterm", icon: "box", host: "distrobox", tabs: [
+      { n: 6, title: "fish", path: "~", meta: "distrobox · 34M", status: "idle" } ] } ] },
+  { id: "root", name: "Elevated", short: "Root", icon: "shield", color: "var(--c-root)", groups: [
+    { name: "root", icon: "shield", tabs: [
+      { n: 7, title: "sudo top", path: "~", meta: "sudo · 19M", status: "running", root: true } ] } ] },
+];
+const count = b => b.groups.reduce((a, g) => a + g.tabs.length, 0);
+const dot = t => `<span class="dot ${t.status}" title="${t.status}"></span>`;
+const bell = t => t.bell ? `<span style="color:var(--amber);display:flex">${ic("bell")}</span>` : "";
+
+const TERM = `<b>~</b> ❯ cargo build
+   Compiling verterm v0.4.0
+   Compiling egui v0.36.1
+    Building [=====>   ] 212/298
+
+<b>~</b> ❯ fastfetch
+OS: CachyOS x86_64
+WM: niri 26.04 (Wayland)
+Terminal: verterm 0.4.0
+
+<b>~</b> ❯ █`;
+
+/* ───── renderers: each returns rail inner HTML for a given active tab ───── */
+const V = [];
+
+V.push({ cls: "v1", name: "Hairline",
+  notes: ["No boxes: sections are separated by spacing and a single hairline.",
+          "One line per tab; the metadata line appears only on the active tab.",
+          "Category colour shrinks to a 6px swatch on the section label."],
+  render: (s) => `
+    <div class="search">${ic("search")} find session or text… <kbd>/</kbd></div>
+    ${BUCKETS.map(b => `
+      <div class="bucket">
+        <div class="bhead"><span class="sw" style="background:${b.color}"></span>${b.name}<span class="n">${count(b)}</span></div>
+        ${b.groups.map(g => `
+          <div class="group ${s.collapsed.has(b.id + g.name) ? "collapsed" : ""}">
+            <div class="ghead" data-group-toggle="${b.id + g.name}">${ic(g.icon)}${g.name}${ic("chev", "i chev")}</div>
+            <div class="kids">${g.tabs.map(t => `
+              <div class="tab ${t.n === s.active ? "active" : ""} ${t.root ? "root" : ""}" data-tab="${t.n}">
+                <span class="ix">${t.n}</span>
+                <span class="t">${t.title}<small>${t.path}</small></span>
+                ${bell(t)}${t.exit ? `<span class="flag">${t.exit}</span>` : ""}${dot(t)}
+                <span class="meta">${t.meta}</span>
+              </div>`).join("")}</div>
+          </div>`).join("")}
+      </div>`).join("")}`
+});
+
+V.push({ cls: "v2", name: "Islands",
+  notes: ["Each project / host is one soft card; buckets are plain labels between them.",
+          "Separation comes from surface and whitespace, never from borders.",
+          "Root gets a faint red wash instead of a red outline."],
+  render: (s) => `
+    <div class="search">${ic("search")} find session or text… <kbd>/</kbd></div>
+    ${BUCKETS.map(b => `
+      <div style="--bcolor:${b.color}">
+        <div class="blabel">${ic(b.icon)}${b.name}</div>
+        ${b.groups.map(g => `
+          <div class="card group ${b.id === "root" ? "root" : ""} ${s.collapsed.has(b.id + g.name) ? "collapsed" : ""}">
+            <div class="ghead" data-group-toggle="${b.id + g.name}">${ic(g.icon)}${g.name}<span class="n">${g.tabs.length}</span></div>
+            <div class="kids">${g.tabs.map(t => `
+              <div class="tab ${t.n === s.active ? "active" : ""}" data-tab="${t.n}">
+                <span class="t">${t.title} <span style="color:var(--faint)">${t.path}</span></span>
+                <span class="right">${bell(t)}${t.exit ? `<span class="pill fail">exit ${t.exit}</span>` : ""}${t.root ? `<span class="pill root">root</span>` : ""}${dot(t)}<span>${t.n}</span></span>
+                <span class="meta">${t.meta}</span>
+              </div>`).join("")}</div>
+          </div>`).join("")}
+      </div>`).join("")}`
+});
+
+V.push({ cls: "v3", name: "Spine",
+  notes: ["The tree is drawn as a thin coloured spine per bucket, like a file tree.",
+          "Groups are hollow nodes, tabs are short branches; the active branch turns accent.",
+          "Densest of the five while still showing all three levels."],
+  render: (s) => `
+    <div class="search">${ic("search")} find session or text… <kbd>/</kbd></div>
+    ${BUCKETS.map(b => `
+      <div class="bucket" style="--bcolor:${b.color}">
+        <div class="bhead">${ic(b.icon)}${b.name}<span class="n">${count(b)}</span></div>
+        <div class="kids-b">${b.groups.map(g => `
+          <div class="group ${s.collapsed.has(b.id + g.name) ? "collapsed" : ""}">
+            <div class="ghead" data-group-toggle="${b.id + g.name}">${g.name}${g.git ? `<span class="mono" style="font-size:10px;color:var(--faint)">${g.git}</span>` : ""}</div>
+            <div class="kids">${g.tabs.map(t => `
+              <div class="tab ${t.n === s.active ? "active" : ""} ${t.root ? "root" : ""}" data-tab="${t.n}">
+                <span class="ix">${t.n}</span><span class="t">${t.title} <span style="color:var(--faint)">${t.path}</span></span>
+                ${bell(t)}${t.exit ? `<span class="x">✕${t.exit}</span>` : ""}${dot(t)}
+              </div>`).join("")}</div>
+          </div>`).join("")}</div>
+      </div>`).join("")}`
+});
+
+V.push({ cls: "v4", name: "Gutter",
+  notes: ["Bucket identity lives in a coloured gutter with a vertical label — zero header rows.",
+          "Groups are inline dividers; tab numbers are keycaps that match Alt+1–9.",
+          "Single line with memory on the right: the most terminal-native, most compact."],
+  render: (s) => `
+    <div class="search">${ic("search")} find session or text… <kbd>/</kbd></div>
+    ${BUCKETS.map(b => `
+      <div class="bucket" style="--bcolor:${b.color}">
+        <div class="gutter"><span>${b.short}</span></div>
+        <div class="body">${b.groups.map(g => `
+          <div class="group ${s.collapsed.has(b.id + g.name) ? "collapsed" : ""}">
+            <div class="ghead" data-group-toggle="${b.id + g.name}">${g.name}<span class="n">${g.tabs.length}</span></div>
+            <div class="kids">${g.tabs.map(t => `
+              <div class="tab ${t.n === s.active ? "active" : ""}" data-tab="${t.n}">
+                <span class="key">${t.n}</span>
+                <span class="t">${t.title} <small>${t.path}</small></span>
+                ${bell(t)}${t.exit ? `<span class="x">${t.exit}</span>` : `<span class="mem">${t.time || t.meta.split(" · ")[1] || ""}</span>`}${dot(t)}
+              </div>`).join("")}</div>
+          </div>`).join("")}</div>
+      </div>`).join("")}`
+});
+
+V.push({ cls: "v5", name: "Filtered",
+  notes: ["Buckets become a segmented filter at the top (All · Local · SSH · Box · Root).",
+          "The list itself is only groups → tabs, so there is one level of nesting fewer.",
+          "Status lives in a right-aligned column: dot, exit code, elapsed time."],
+  render: (s) => {
+    const shown = BUCKETS.filter(b => s.filter === "all" || s.filter === b.id);
+    return `
+    <div class="search">${ic("search")} find session or text… <kbd>/</kbd></div>
+    <div class="seg">
+      <button data-filter="all" class="${s.filter === "all" ? "on" : ""}">All<sup>7</sup></button>
+      ${BUCKETS.map(b => `<button data-filter="${b.id}" title="${b.name}" style="--bcolor:${b.color}" class="${s.filter === b.id ? "on" : ""}">${ic(b.icon)}<sup>${count(b)}</sup></button>`).join("")}
+    </div>
+    ${shown.map(b => b.groups.map(g => `
+      <div class="group ${s.collapsed.has(b.id + g.name) ? "collapsed" : ""}" style="--bcolor:${b.color}">
+        <div class="ghead" data-group-toggle="${b.id + g.name}">${ic(g.icon)}${g.name}${g.host ? `<span class="host">${g.host}</span>` : ""}${ic("chev", "i chev")}</div>
+        <div class="kids">${g.tabs.map(t => `
+          <div class="tab ${t.n === s.active ? "active" : ""} ${t.root ? "root" : ""}" data-tab="${t.n}">
+            <span class="ix">${t.n}</span>
+            <span class="t">${t.title} <span style="color:var(--faint)">${t.path}</span></span>
+            <span class="st ${t.exit ? "fail" : t.root ? "root" : ""}">${bell(t)}${t.exit ? "exit " + t.exit : t.root ? "root" : t.time || ""}${dot(t)}</span>
+            <span class="meta">${t.meta}</span>
+          </div>`).join("")}</div>
+      </div>`).join("")).join("")}`;
+  }
+});
+
+/* ───── mount + interaction ───── */
+const root = document.getElementById("protos");
+V.forEach((v, i) => {
+  const state = { active: 1, collapsed: new Set(), filter: "all" };
+  const el = document.createElement("section");
+  el.className = "proto";
+  el.innerHTML = `
+    <h2><span>${i + 1}</span>${v.name}</h2>
+    <div class="win ${v.cls}"><nav class="rail"></nav><div class="term">${TERM}</div></div>
+    <ul class="notes">${v.notes.map(n => `<li>${n}</li>`).join("")}</ul>`;
+  const rail = el.querySelector(".rail");
+  const draw = () => { rail.innerHTML = v.render(state); };
+  rail.addEventListener("click", e => {
+    const tab = e.target.closest("[data-tab]");
+    const grp = e.target.closest("[data-group-toggle]");
+    const flt = e.target.closest("[data-filter]");
+    if (tab) state.active = +tab.dataset.tab;
+    else if (grp) {
+      const k = grp.dataset.groupToggle;
+      state.collapsed.has(k) ? state.collapsed.delete(k) : state.collapsed.add(k);
+    } else if (flt) state.filter = flt.dataset.filter;
+    else return;
+    draw();
+  });
+  draw();
+  root.appendChild(el);
+});
+
+document.getElementById("theme").addEventListener("click", () => {
+  const r = document.documentElement;
+  const dark = r.dataset.theme ? r.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  r.dataset.theme = dark ? "light" : "dark";
+});
+</script>
+</body>
+</html>
