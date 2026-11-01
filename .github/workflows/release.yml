@@ -418,7 +418,7 @@ jobs:
         run: |
           set -eux
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl git file desktop-file-utils
+          apt-get install -y --no-install-recommends ca-certificates curl git file desktop-file-utils librsvg2-bin
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
@@ -442,21 +442,27 @@ jobs:
 
           install -m755 packaging/appimage/AppRun "$AppDir/AppRun"
           # appimagetool wants the desktop entry and the icon at the AppDir root, and
-          # uses .DirIcon as the thumbnail shown by file managers.
+          # uses .DirIcon as the thumbnail shown by file managers. .DirIcon must be a
+          # PNG: thumbnailers are not expected to parse SVG, and appimagetool's
+          # continuous build of 2026-10-31 refused an SVG .DirIcon outright (v0.4.0's
+          # release failed on exactly that), with "will be enforced in a future
+          # release" once it was relaxed back to a warning. The PNG is rendered from
+          # the one SVG we maintain rather than committed beside it, so they cannot drift.
           cp "$AppDir/usr/share/applications/verterm.desktop" "$AppDir/verterm.desktop"
-          cp "$AppDir/usr/share/icons/hicolor/scalable/apps/verterm.svg" "$AppDir/verterm.svg"
-          ln -s verterm.svg "$AppDir/.DirIcon"
+          rsvg-convert -w 256 -h 256 "$AppDir/usr/share/icons/hicolor/scalable/apps/verterm.svg" -o "$AppDir/verterm.png"
+          ln -s verterm.png "$AppDir/.DirIcon"
 
           desktop-file-validate "$AppDir/verterm.desktop"
 
-          # The tool moved repositories; try its current home first, then the old one.
-          for u in \
-            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage \
-            https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
-          do
-            if curl -fsSL -o appimagetool "$u"; then echo "got appimagetool from $u"; break; fi
-          done
-          [[ -s appimagetool ]] || { echo "::error::could not download appimagetool"; exit 1; }
+          # Pinned by version and checksum. The `continuous` tag is rebuilt on every
+          # upstream commit, so a release could pass on one day and fail the next with
+          # nothing in this repository changed. Bump both lines together.
+          appimagetool_url=https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          appimagetool_sha256=ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+          curl -fsSL -o appimagetool "$appimagetool_url" \
+            || { echo "::error::could not download $appimagetool_url"; exit 1; }
+          sha256sum -c <<<"$appimagetool_sha256  appimagetool" \
+            || { echo "::error::appimagetool checksum mismatch"; exit 1; }
           chmod +x appimagetool
 
           mkdir -p dist
