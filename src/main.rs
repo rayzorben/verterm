@@ -126,6 +126,22 @@ fn init_tracing() {
         .init();
 }
 
+/// egui-wgpu asks for the high-performance adapter unless `WGPU_POWER_PREF` says
+/// otherwise, which on a hybrid-GPU laptop wakes the discrete GPU and keeps it
+/// out of runtime D3 for as long as verterm runs (an idle RTX 5060 then draws
+/// ~5 W instead of 0). A terminal has no use for it: default to the integrated
+/// GPU, and still honour `WGPU_POWER_PREF=high` for anyone who wants the other.
+fn low_power_wgpu() -> eframe::egui_wgpu::WgpuConfiguration {
+    use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup};
+    use eframe::wgpu::PowerPreference;
+
+    let mut config = WgpuConfiguration::default();
+    if let WgpuSetup::CreateNew(setup) = &mut config.wgpu_setup {
+        setup.power_preference = PowerPreference::from_env().unwrap_or(PowerPreference::LowPower);
+    }
+    config
+}
+
 fn main() -> Result<()> {
     let cli = parse_cli();
     if cli.print_default_config {
@@ -151,6 +167,7 @@ fn main() -> Result<()> {
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([320.0, 200.0]),
         renderer: eframe::Renderer::Wgpu,
+        wgpu_options: low_power_wgpu(),
         persist_window: false,
         ..Default::default()
     };
