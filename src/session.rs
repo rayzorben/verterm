@@ -330,6 +330,28 @@ pub struct SpawnRequest {
     pub bbs_auto_telnet: bool,
 }
 
+/// A command to type into a freshly spawned shell once it is ready to read it.
+#[derive(Clone, Debug)]
+pub struct PendingLaunch {
+    pub command: String,
+    pub spawned_at: Instant,
+}
+
+impl PendingLaunch {
+    /// Shell integration reports the first prompt (OSC 133;A), which is the exact moment.
+    /// Without it, the shell has printed *something* and gone quiet for a moment; and if
+    /// neither ever happens the command is sent anyway, since the PTY buffers it.
+    pub const NO_PROMPT_GRACE: Duration = Duration::from_millis(400);
+    pub const GIVE_UP: Duration = Duration::from_secs(3);
+
+    pub fn ready(&self, prompt_seen: bool, has_output: bool, integration: bool) -> bool {
+        let age = self.spawned_at.elapsed();
+        prompt_seen
+            || (!integration && has_output && age >= Self::NO_PROMPT_GRACE)
+            || age >= Self::GIVE_UP
+    }
+}
+
 pub struct Session {
     pub id: TabId,
     pub kind: TabKind,
@@ -340,6 +362,12 @@ pub struct Session {
     pub group_override: Option<String>,
     pub bell_at: Option<Instant>,
     pub program_label: String,
+    /// Name of the pinned session this tab was opened from (`crate::pins`).
+    pub pin: Option<String>,
+    /// A pin's command waiting for the shell's first prompt before it is typed in.
+    pub launch: Option<PendingLaunch>,
+    /// Shell-integration hooks were injected, so an OSC 133;A prompt mark is expected.
+    pub integrated: bool,
     cols: u16,
     rows: u16,
     cell_px: (u16, u16),
@@ -387,6 +415,7 @@ impl Session {
             .to_string();
         let is_interactive_shell = req.args.is_empty()
             && (req.program.is_none() || matches!(shell_name.as_str(), "bash" | "zsh" | "fish"));
+        let integrated = is_interactive_shell && req.integration.is_some();
         if is_interactive_shell && let Some(integration) = &req.integration {
             integration.configure(&program, &mut cmd);
         }
@@ -506,6 +535,9 @@ impl Session {
             group_override: None,
             bell_at: None,
             program_label,
+            pin: None,
+            launch: None,
+            integrated,
             cols,
             rows,
             cell_px: req.cell_px,
@@ -769,5 +801,31 @@ fn apply_osc_events(shared: &SessionShared, events: &[(OscEvent, GridPos)]) {
                 st.finish_command(*code);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+
+    fn launch(age: Duration) -> PendingLaunch {
+        PendingLaunch {
+            command: "ssh h".into(),
+            spawned_at: Instant::now() - age,
+        }
+    }
+
+    #[test]
+    fn a_pin_command_waits_for_the_prompt() {
+        // With shell integration, only the prompt mark (or the give-up timer) releases it.
+        assert!(!launch(Duration::ZERO).ready(false, true, true));
+        assert!(!launch(Duration::from_secs(1)).ready(false, true, true));
+        assert!(launch(Duration::ZERO).ready(true, true, true));
+        // Without it, output followed by a short quiet spell is the best signal there is.
+        assert!(!launch(Duration::ZERO).ready(false, true, false));
+        assert!(!launch(Duration::from_secs(1)).ready(false, false, false));
+        assert!(launch(Duration::from_secs(1)).ready(false, true, false));
+        // Never forever.
+        assert!(launch(PendingLaunch::GIVE_UP).ready(false, false, true));
     }
 }

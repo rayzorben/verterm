@@ -9,7 +9,7 @@ pub mod rail;
 pub mod terminal_view;
 pub mod theme;
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,9 +32,11 @@ use crate::input;
 use crate::keymap::{Action, Chord, Keymap};
 use crate::links::Matcher;
 use crate::notify;
+use crate::pins::{Pin, PinFile, PinKind, PinWriter};
 use crate::procscan::{self, ScanRegistry};
 use crate::session::{
-    ProcessCategory, Session, SessionState, SpawnRequest, TabId, TabKind, default_shell,
+    PendingLaunch, ProcessCategory, Session, SessionState, SpawnRequest, TabId, TabKind,
+    default_shell,
 };
 use crate::shell_integration::ShellIntegration;
 use crate::tabsearch;
@@ -42,10 +44,11 @@ use crate::workspace::{self, Bucket, TabInput, TabTree};
 use chrome::{Chip, Typography};
 use fonts::{CellMetrics, TermFonts};
 use overlays::{
-    AiChrome, AiOutcome, AiOverlayState, PaletteOutcome, PaletteState, PromptOutcome, PromptState,
+    AiChrome, AiOutcome, AiOverlayState, PaletteOutcome, PaletteState, PinEditOutcome,
+    PinEditState, PinItem, PinLauncherOutcome, PinLauncherState, PromptOutcome, PromptState,
     SearchOutcome,
 };
-use rail::{Badge, Indicator, Row, TabRow};
+use rail::{Badge, Indicator, PinRow, Row, TabRow};
 use terminal_view::{GridLink, HintOverlay, LinkOverlay, RenderCtx};
 use theme::{Palette, UiColors};
 
@@ -83,6 +86,10 @@ pub enum Mode {
     Prompt(PromptState),
     /// The rail's find box owns the keyboard.
     FindSession,
+    /// The pinned-session launcher (and its unpin confirmation).
+    PinLauncher(PinLauncherState),
+    /// Adding or editing a pinned session.
+    PinEdit(Box<PinEditState>),
 }
 
 impl Mode {
@@ -96,13 +103,20 @@ impl Mode {
             Mode::Palette(_) => "PALETTE",
             Mode::Prompt(_) => "SCRATCH",
             Mode::FindSession => "FIND",
+            Mode::PinLauncher(_) => "PINS",
+            Mode::PinEdit(_) => "PIN",
         }
     }
 
     /// True when an egui text field owns keyboard input (so the terminal must not drain it).
     fn text_input_active(&self) -> bool {
         match self {
-            Mode::Ai(_) | Mode::Palette(_) | Mode::Prompt(_) | Mode::FindSession => true,
+            Mode::Ai(_)
+            | Mode::Palette(_)
+            | Mode::Prompt(_)
+            | Mode::FindSession
+            | Mode::PinLauncher(_)
+            | Mode::PinEdit(_) => true,
             Mode::Vi(v) => v.search.as_ref().is_some_and(|s| s.input_active),
             _ => false,
         }
@@ -122,6 +136,11 @@ enum Followup {
     SearchChanged,
     SearchConfirm,
     SearchCancel,
+    PinOpen(String, bool),
+    PinEdit(String),
+    PinNew(String),
+    PinRemove(String),
+    PinSave,
 }
 
 /// What the terminal was showing where the user right-clicked. Captured once, when the menu
@@ -253,6 +272,9 @@ fn bucket_tint(bucket: Bucket, c: &UiColors) -> egui::Color32 {
     }
 }
 
+/// Collapse key of the rail's PINNED box. Not a `Bucket`: pins are not tabs.
+const PINNED_BUCKET_KEY: &str = "bucket:pinned";
+
 /// Menu labels quote the matched text, which can be a 200-char URL; keep the popup narrow.
 fn elide_menu_text(s: &str) -> String {
     const MAX: usize = 32;
@@ -322,6 +344,16 @@ pub struct App {
     links: Vec<GridLink>,
     /// What `links` was computed from: tab, grid generation, scroll position, size.
     links_key: Option<(TabId, u64, usize, u16, u16)>,
+    /// Pinned sessions (`sessions.toml`).
+    pins: PinFile,
+    pin_writer: Option<PinWriter>,
+    pins_rx: Option<Receiver<PinFile>>,
+    /// Lists this run wrote itself, oldest first. The watcher reports our own saves back to
+    /// us; a reload equal to one of them is an echo, not a hand edit, and applying an older
+    /// echo after a newer in-app change would briefly undo that change.
+    pins_written: VecDeque<PinFile>,
+    /// `key = ...` of each pin, parsed. Checked after the keymap, so actions win a clash.
+    pin_keys: Vec<(Chord, String)>,
     /// Index into `links` of the one under the pointer this frame.
     hovered_link: Option<usize>,
     /// The link the primary button went down on. Activation waits for the release on the same
@@ -435,27 +467,64 @@ impl App {
             links_key: None,
             hovered_link: None,
             link_press: None,
+            pins: PinFile::default(),
+            pin_writer: None,
+            pins_rx: None,
+            pins_written: VecDeque::new(),
+            pin_keys: Vec::new(),
         };
         for w in warnings {
             app.toast(w);
         }
 
-        let (program, args) = if cli.command.is_empty() {
-            (None, Vec::new())
-        } else {
-            (Some(cli.command[0].clone()), cli.command[1..].to_vec())
-        };
-        if app
-            .spawn_tab(
+        if let Some(path) = PinFile::path() {
+            match PinFile::load(&path) {
+                Ok(f) => app.pins = f,
+                Err(e) => app.toast(format!("pinned sessions not loaded: {e:#}")),
+            }
+            app.pin_writer = Some(PinWriter::spawn(path.clone()));
+            app.pins_rx = Some(crate::config::spawn_file_watcher(
+                path,
+                "pins-watch",
+                PinFile::load,
+                ctx.clone(),
+            ));
+        }
+        app.rebuild_pin_keys();
+
+        // Autostart pins replace the plain first shell, unless the command line asked for a
+        // particular one (`-d` / `-e`), in which case that tab opens too and stays in front.
+        let autostart: Vec<String> = app
+            .pins
+            .pins
+            .iter()
+            .filter(|p| p.autostart)
+            .map(|p| p.name.clone())
+            .collect();
+        let cli_specific = !cli.command.is_empty() || cli.working_directory.is_some();
+        let mut first = None;
+        if cli_specific || autostart.is_empty() {
+            let (program, args) = if cli.command.is_empty() {
+                (None, Vec::new())
+            } else {
+                (Some(cli.command[0].clone()), cli.command[1..].to_vec())
+            };
+            first = app.spawn_tab(
                 &ctx,
                 program,
                 args,
                 cli.working_directory.clone(),
                 TabKind::Normal,
-            )
-            .is_none()
-        {
-            anyhow::bail!("could not start the first shell");
+            );
+        }
+        let mut first_pin = None;
+        for name in autostart {
+            let id = app.launch_pin(&ctx, &name, true);
+            first_pin = first_pin.or(id);
+        }
+        match first.or(first_pin) {
+            Some(id) => app.activate(id),
+            None => anyhow::bail!("could not start the first shell"),
         }
         Ok(app)
     }
@@ -612,6 +681,332 @@ impl App {
         }
     }
 
+    // -----------------------------------------------------------------------------------
+    // Pinned sessions
+    // -----------------------------------------------------------------------------------
+
+    fn rebuild_pin_keys(&mut self) {
+        self.pin_keys.clear();
+        let mut warnings = Vec::new();
+        for pin in &self.pins.pins {
+            match pin.chord() {
+                None => {}
+                Some(Err(e)) => warnings.push(format!("pin {:?}: key {e}", pin.name)),
+                Some(Ok(chord)) => {
+                    if let Some(a) = self.keymap.lookup(chord) {
+                        warnings.push(format!(
+                            "pin {:?}: {} is already bound to {}",
+                            pin.name,
+                            chord.display(),
+                            a.label()
+                        ));
+                    } else {
+                        self.pin_keys.push((chord, pin.name.clone()));
+                    }
+                }
+            }
+        }
+        for w in warnings {
+            self.toast(w);
+        }
+    }
+
+    /// Persist the in-memory list (on the writer thread) and remember it as our own echo.
+    fn save_pins(&mut self) {
+        if let Some(w) = &self.pin_writer {
+            w.save(&self.pins);
+            self.pins_written.push_back(self.pins.clone());
+            while self.pins_written.len() > 8 {
+                self.pins_written.pop_front();
+            }
+        }
+        self.rebuild_pin_keys();
+    }
+
+    fn poll_pins_reload(&mut self) {
+        let Some(rx) = &self.pins_rx else { return };
+        let mut changed = None;
+        for file in rx.try_iter() {
+            if let Some(pos) = self.pins_written.iter().position(|w| *w == file) {
+                // Our own save coming back; everything before it has landed too.
+                self.pins_written.drain(..=pos);
+            } else {
+                changed = Some(file);
+            }
+        }
+        if let Some(file) = changed
+            && file != self.pins
+        {
+            self.pins = file;
+            // A pin renamed or removed by hand leaves its tabs as plain tabs.
+            for s in &mut self.sessions {
+                if s.pin
+                    .as_deref()
+                    .is_some_and(|n| self.pins.find(n).is_none())
+                {
+                    s.pin = None;
+                }
+            }
+            self.rebuild_pin_keys();
+            self.toast("pinned sessions reloaded");
+        }
+    }
+
+    /// The live tab opened from pin `name`, if one is still running.
+    fn pin_tab(&self, name: &str) -> Option<TabId> {
+        self.sessions
+            .iter()
+            .find(|s| {
+                s.pin
+                    .as_deref()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(name))
+            })
+            .map(|s| s.id)
+    }
+
+    /// Focus the pin's tab, or open one. `new_copy` always opens another.
+    fn launch_pin(&mut self, ctx: &egui::Context, name: &str, new_copy: bool) -> Option<TabId> {
+        if !new_copy && let Some(id) = self.pin_tab(name) {
+            self.activate(id);
+            return Some(id);
+        }
+        let Some(pin) = self.pins.find(name).cloned() else {
+            self.toast(format!("no pinned session named {name:?}"));
+            return None;
+        };
+        let cwd = pin.start_dir(&self.home);
+        if let Some(dir) = &cwd
+            && !dir.is_dir()
+        {
+            self.toast(format!(
+                "{}: {} is not a directory, starting in ~",
+                pin.name,
+                dir.display()
+            ));
+        }
+        // Always the login shell; the pin's command is typed into it at the first prompt
+        // (see `crate::pins` for why it is never the tab's program).
+        let id = self.spawn_tab(ctx, None, Vec::new(), cwd, TabKind::Normal)?;
+        if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
+            s.pin = Some(pin.name.clone());
+            s.launch = pin.launch_command().map(|command| PendingLaunch {
+                command,
+                spawned_at: Instant::now(),
+            });
+        }
+        Some(id)
+    }
+
+    /// Type each waiting pin command into its shell once that shell is ready for it.
+    fn deliver_pin_launches(&mut self) {
+        for s in &mut self.sessions {
+            let Some(launch) = &s.launch else { continue };
+            let prompt_seen = s.shared.state.lock().osc133_seen;
+            let has_output = s.shared.grid_generation() > 0;
+            if launch.ready(prompt_seen, has_output, s.integrated) {
+                let mut line = launch.command.clone().into_bytes();
+                line.push(b'\r');
+                s.write(line);
+                s.launch = None;
+            }
+        }
+    }
+
+    /// A pin describing tab `id` as it is now: its host, container or folder.
+    fn pin_from_tab(&self, id: TabId) -> Pin {
+        let Some(s) = self.session(id) else {
+            return Pin::default();
+        };
+        let st = s.shared.state.lock();
+        match &st.category {
+            ProcessCategory::RemoteSSH { target } => Pin {
+                name: target.clone(),
+                kind: PinKind::Ssh,
+                target: Some(target.clone()),
+                ..Pin::default()
+            },
+            ProcessCategory::Container { name } => Pin {
+                name: name.clone(),
+                kind: PinKind::Container,
+                container: Some(name.clone()),
+                ..Pin::default()
+            },
+            _ => {
+                let dir = st
+                    .project_root
+                    .as_deref()
+                    .or(st.cwd())
+                    .map(|p| p.to_path_buf());
+                let name = dir
+                    .as_deref()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "home".into());
+                Pin {
+                    name,
+                    kind: PinKind::Local,
+                    dir: dir.map(|d| shorten_home(&d, &self.home)),
+                    ..Pin::default()
+                }
+            }
+        }
+    }
+
+    /// A name not yet taken, starting from `base`.
+    fn unique_pin_name(&self, base: &str) -> String {
+        let base = if base.trim().is_empty() {
+            "session"
+        } else {
+            base.trim()
+        };
+        if self.pins.find(base).is_none() {
+            return base.to_string();
+        }
+        (2..)
+            .map(|n| format!("{base}-{n}"))
+            .find(|n| self.pins.find(n).is_none())
+            .unwrap_or_else(|| base.to_string())
+    }
+
+    fn open_pin_editor(&mut self, original: Option<String>, mut pin: Pin, from_tab: Option<TabId>) {
+        if original.is_none() {
+            pin.name = self.unique_pin_name(&pin.name);
+        }
+        self.leave_mode();
+        let mut state = PinEditState::new(original, &pin);
+        state.from_tab = from_tab.map(|id| (id, pin.normalized()));
+        self.mode = Mode::PinEdit(Box::new(state));
+    }
+
+    /// Validate the form and store it; on a refusal the form stays open with the reason.
+    fn save_pin_edit(&mut self) {
+        let Mode::PinEdit(state) = &mut self.mode else {
+            return;
+        };
+        let pin = state.to_pin();
+        let original = state.original.clone();
+        let from_tab = state.from_tab.take();
+        let others = self.pins.pins.iter().filter(|p| {
+            original
+                .as_deref()
+                .is_none_or(|o| !p.name.eq_ignore_ascii_case(o))
+        });
+        if let Err(e) = pin.validate(others) {
+            state.error = Some(format!("{e:#}"));
+            state.from_tab = from_tab;
+            return;
+        }
+        match original.as_deref().and_then(|o| {
+            self.pins
+                .pins
+                .iter()
+                .position(|p| p.name.eq_ignore_ascii_case(o))
+        }) {
+            Some(i) => self.pins.pins[i] = pin.clone(),
+            None => self.pins.pins.push(pin.clone()),
+        }
+        // A rename follows the tabs that came from the pin.
+        if let Some(o) = &original {
+            for s in &mut self.sessions {
+                if s.pin.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(o)) {
+                    s.pin = Some(pin.name.clone());
+                }
+            }
+        }
+        // Pinning a tab: if the form still describes that tab, the tab *is* the pin's
+        // session now. If the user turned it into something else, it is just a new pin.
+        if let Some((id, pre)) = &from_tab
+            && pin.kind == pre.kind
+            && pin.target_text() == pre.target_text()
+            && (pin.kind != PinKind::Local || pin.dir == pre.dir)
+            && let Some(s) = self.sessions.iter_mut().find(|s| s.id == *id)
+            && s.pin.is_none()
+        {
+            s.pin = Some(pin.name.clone());
+        }
+        self.mode = Mode::Normal;
+        self.save_pins();
+        self.toast(format!("pinned {}", pin.name));
+    }
+
+    fn remove_pin(&mut self, name: &str) {
+        let before = self.pins.pins.len();
+        self.pins
+            .pins
+            .retain(|p| !p.name.eq_ignore_ascii_case(name));
+        if self.pins.pins.len() == before {
+            return;
+        }
+        for s in &mut self.sessions {
+            if s.pin
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+            {
+                s.pin = None;
+            }
+        }
+        self.save_pins();
+        self.toast(format!("unpinned {name}"));
+    }
+
+    fn pin_kind_color(&self, kind: PinKind) -> egui::Color32 {
+        match kind {
+            PinKind::Local => self.colors.accent,
+            PinKind::Ssh => self.colors.gold,
+            PinKind::Container => self.colors.blue,
+            PinKind::Command => self.colors.muted,
+        }
+    }
+
+    fn pin_items(&self) -> Vec<PinItem> {
+        self.pins
+            .pins
+            .iter()
+            .map(|p| PinItem {
+                name: p.name.clone(),
+                kind: p.kind.label(),
+                kind_color: self.pin_kind_color(p.kind),
+                summary: p.summary(),
+                key: p.key.clone(),
+                open: self.pin_tab(&p.name).is_some(),
+            })
+            .collect()
+    }
+
+    fn pin_rows(&self) -> Vec<Row> {
+        if self.pins.pins.is_empty() {
+            return Vec::new();
+        }
+        let key = PINNED_BUCKET_KEY.to_string();
+        let collapsed = self.collapsed.contains(&key);
+        let mut rows = vec![Row::Bucket {
+            key,
+            label: "PINNED",
+            icon: chrome::Icon::Pin,
+            collapsed,
+            count: self.pins.pins.len(),
+            elevated: false,
+            tint: self.colors.accent,
+            summary: Vec::new(),
+        }];
+        if collapsed {
+            return rows;
+        }
+        for p in &self.pins.pins {
+            let tab = self.pin_tab(&p.name);
+            rows.push(Row::Pin(PinRow {
+                name: p.name.clone(),
+                kind: p.kind.label(),
+                kind_color: self.pin_kind_color(p.kind),
+                summary: p.summary(),
+                key: p.key.clone(),
+                open: tab.is_some(),
+                active: tab.is_some() && tab == self.active,
+            }));
+        }
+        rows
+    }
+
     fn tree(&self) -> TabTree {
         let guards: Vec<_> = self
             .sessions
@@ -676,6 +1071,7 @@ impl App {
 
     fn poll_sessions(&mut self, ctx: &egui::Context) {
         self.drain_clipboard_paste();
+        self.deliver_pin_launches();
         let window_focused = self.window_focused;
         let active = self.active;
         let notif = self.cfg.notifications.clone();
@@ -809,10 +1205,18 @@ impl App {
 
     fn handle_global_keys(&mut self, ctx: &egui::Context) {
         let mut actions = Vec::new();
+        let mut pins: Vec<String> = Vec::new();
         let mut alt_chord_matched = false;
         {
             let super_down = &mut self.super_down;
             let keymap = &self.keymap;
+            let pin_keys = &self.pin_keys;
+            let pin_for = |chord: Chord| {
+                pin_keys
+                    .iter()
+                    .find(|(c, _)| *c == chord)
+                    .map(|(_, n)| n.clone())
+            };
             ctx.input_mut(|i| {
                 if super_latch_is_stale(i.focused, &i.events) {
                     *super_down = false;
@@ -831,21 +1235,28 @@ impl App {
                             return false;
                         }
                         if *pressed {
-                            let chord = Chord::from_event(*key, *modifiers, *super_down);
-                            if let Some(a) = keymap.lookup(chord) {
+                            // Logical key first, then the physical one (a layout may report
+                            // `Plus` for `=`, or `!` for Shift+1). Actions win over pin keys on
+                            // either, so a pin can never shadow a built-in binding.
+                            let logical = Chord::from_event(*key, *modifiers, *super_down);
+                            let physical = physical_key
+                                .filter(|pk| pk != key)
+                                .map(|pk| Chord::from_event(pk, *modifiers, *super_down));
+                            let chords = std::iter::once(logical).chain(physical);
+                            if let Some((c, a)) = chords
+                                .clone()
+                                .find_map(|c| keymap.lookup(c).map(|a| (c, a)))
+                            {
                                 actions.push(a);
-                                alt_chord_matched |= chord.alt;
+                                alt_chord_matched |= c.alt;
                                 return false;
                             }
-                            if let Some(pk) = physical_key
-                                && pk != key
+                            if let Some((c, name)) =
+                                chords.into_iter().find_map(|c| pin_for(c).map(|n| (c, n)))
                             {
-                                let chord = Chord::from_event(*pk, *modifiers, *super_down);
-                                if let Some(a) = keymap.lookup(chord) {
-                                    actions.push(a);
-                                    alt_chord_matched |= chord.alt;
-                                    return false;
-                                }
+                                pins.push(name);
+                                alt_chord_matched |= c.alt;
+                                return false;
                             }
                         }
                     }
@@ -863,6 +1274,9 @@ impl App {
         }
         for a in actions {
             self.perform(ctx, a);
+        }
+        for name in pins {
+            self.launch_pin(ctx, &name, false);
         }
     }
 
@@ -1015,6 +1429,20 @@ impl App {
                     } else {
                         "BBS mode off"
                     });
+                }
+            }
+            Action::OpenPinned => {
+                if matches!(self.mode, Mode::PinLauncher(_)) {
+                    self.leave_mode();
+                } else {
+                    self.leave_mode();
+                    self.mode = Mode::PinLauncher(PinLauncherState::default());
+                }
+            }
+            Action::PinTab => {
+                if let Some(id) = self.active {
+                    let pin = self.pin_from_tab(id);
+                    self.open_pin_editor(None, pin, Some(id));
                 }
             }
             Action::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
@@ -2210,6 +2638,7 @@ impl App {
             elevated: matches!(st.category, ProcessCategory::ElevatedRoot),
             active,
             bell: s.bell_at.is_some(),
+            pin: s.pin.clone(),
         }
     }
 
@@ -2488,6 +2917,11 @@ impl App {
             .map(|a| (a.model().to_string(), a.endpoint().to_string()))
             .unwrap_or_default();
 
+        let pin_items = if matches!(self.mode, Mode::PinLauncher(_)) {
+            self.pin_items()
+        } else {
+            Vec::new()
+        };
         let followup = match &mut self.mode {
             Mode::Ai(state) => {
                 let ai_chrome = AiChrome {
@@ -2519,6 +2953,26 @@ impl App {
                     PromptOutcome::None => Followup::None,
                     PromptOutcome::Submit(cmd) => Followup::SpawnScratch(cmd),
                     PromptOutcome::Cancel => Followup::CloseMode,
+                }
+            }
+            Mode::PinLauncher(state) => {
+                let items = pin_items;
+                match overlays::show_pin_launcher(ctx, screen, state, &items, &colors, &ty) {
+                    PinLauncherOutcome::None => Followup::None,
+                    PinLauncherOutcome::Close => Followup::CloseMode,
+                    PinLauncherOutcome::Open { name, new_copy } => {
+                        Followup::PinOpen(name, new_copy)
+                    }
+                    PinLauncherOutcome::Edit(name) => Followup::PinEdit(name),
+                    PinLauncherOutcome::New(name) => Followup::PinNew(name),
+                    PinLauncherOutcome::Remove(name) => Followup::PinRemove(name),
+                }
+            }
+            Mode::PinEdit(state) => {
+                match overlays::show_pin_edit(ctx, screen, state, &colors, &ty) {
+                    PinEditOutcome::None => Followup::None,
+                    PinEditOutcome::Save => Followup::PinSave,
+                    PinEditOutcome::Cancel => Followup::CloseMode,
                 }
             }
             Mode::Vi(v) => match v.search.as_mut() {
@@ -2603,6 +3057,27 @@ impl App {
                     s.write(b"\r".to_vec());
                 }
             }
+            Followup::PinOpen(name, new_copy) => {
+                self.leave_mode();
+                self.launch_pin(ctx, &name, new_copy);
+            }
+            Followup::PinEdit(name) => {
+                if let Some(pin) = self.pins.find(&name).cloned() {
+                    self.open_pin_editor(Some(pin.name.clone()), pin, None);
+                }
+            }
+            Followup::PinNew(name) => {
+                let pin = Pin {
+                    name,
+                    ..Pin::default()
+                };
+                self.open_pin_editor(None, pin, None);
+            }
+            Followup::PinRemove(name) => {
+                self.leave_mode();
+                self.remove_pin(&name);
+            }
+            Followup::PinSave => self.save_pin_edit(),
             Followup::SearchChanged => self.run_search(true, false),
             Followup::SearchConfirm => {
                 if let Mode::Vi(v) = &mut self.mode
@@ -2726,7 +3201,11 @@ impl App {
             .iter()
             .any(|s| s.shared.state.lock().running.is_some());
         let blink = self.cfg.general.cursor_blink && self.window_focused;
-        if any_running || !self.toasts.is_empty() {
+        // A pin command waiting on its fallback timer needs a frame to notice it is due.
+        let launching = self.sessions.iter().any(|s| s.launch.is_some());
+        if launching {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        } else if any_running || !self.toasts.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(120));
         } else if blink {
             ctx.request_repaint_after(Duration::from_millis(500));
@@ -2769,6 +3248,7 @@ impl eframe::App for App {
             self.cfg.font.line_height,
         );
         self.poll_config_reload(&ctx);
+        self.poll_pins_reload();
         self.poll_sessions(&ctx);
         self.poll_notification_clicks(&ctx);
         self.handle_global_keys(&ctx);
@@ -2826,7 +3306,9 @@ impl eframe::App for App {
             let rows = if searching {
                 self.find_rows(&ordered)
             } else {
-                self.build_rows(&tree, &ordered)
+                let mut rows = self.pin_rows();
+                rows.extend(self.build_rows(&tree, &ordered));
+                rows
             };
             let ty = self.rail_typography();
             let colors = self.colors;
@@ -2900,6 +3382,29 @@ impl eframe::App for App {
                     }
                     None => self.toast("no working directory for that tab"),
                 }
+            }
+            if let Some((name, new_copy)) = out.pin_open {
+                self.find.clear();
+                self.launch_pin(&ctx, &name, new_copy);
+            }
+            if let Some(name) = out.pin_edit
+                && let Some(pin) = self.pins.find(&name).cloned()
+            {
+                self.open_pin_editor(Some(pin.name.clone()), pin, None);
+            }
+            if let Some(name) = out.pin_remove {
+                self.leave_mode();
+                self.mode = Mode::PinLauncher(PinLauncherState {
+                    confirm_unpin: Some(name),
+                    ..PinLauncherState::default()
+                });
+            }
+            if let Some(id) = out.pin_tab {
+                let pin = self.pin_from_tab(id);
+                self.open_pin_editor(None, pin, Some(id));
+            }
+            if out.pin_new {
+                self.open_pin_editor(None, Pin::default(), None);
             }
             if out.collapse_all || out.expand_all {
                 let tree = self.tree();

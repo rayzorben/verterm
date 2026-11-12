@@ -120,6 +120,26 @@ pub struct TabRow {
     pub elevated: bool,
     pub active: bool,
     pub bell: bool,
+    /// Name of the pinned session this tab was opened from.
+    pub pin: Option<String>,
+}
+
+/// One pinned session in the rail's PINNED box.
+#[derive(Clone, Debug)]
+pub struct PinRow {
+    pub name: String,
+    /// `ssh` / `container` / `local` / `command`.
+    pub kind: &'static str,
+    /// Chip colour for the kind — the same hue the session wears once it is open.
+    pub kind_color: Color32,
+    /// What it runs (or the folder it opens), for the tooltip.
+    pub summary: String,
+    /// The pin's chord, if it has one.
+    pub key: Option<String>,
+    /// A tab opened from this pin is still alive.
+    pub open: bool,
+    /// ...and it is the active tab.
+    pub active: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -145,6 +165,7 @@ pub enum Row {
         count: usize,
     },
     Tab(TabRow),
+    Pin(PinRow),
 }
 
 #[derive(Default)]
@@ -165,6 +186,14 @@ pub struct RailOutput {
     pub focus_find: bool,
     /// The query text changed this frame.
     pub find_changed: bool,
+    /// Open the named pin (`true` = always a new tab, even if one is already open).
+    pub pin_open: Option<(String, bool)>,
+    pub pin_edit: Option<String>,
+    pub pin_remove: Option<String>,
+    /// "Pin tab…" from a tab's context menu.
+    pub pin_tab: Option<TabId>,
+    /// "New pinned session…" from the rail's own menu.
+    pub pin_new: bool,
 }
 
 /// Dot colour for a tab's lifecycle state, and whether it should pulse with a halo.
@@ -350,6 +379,7 @@ fn row_height(row: &Row, ty: &Typography) -> f32 {
         Row::Bucket { .. } => (ty.ui.size * 2.3).round(),
         Row::Group { .. } => (ty.ui.size * 1.8).round(),
         Row::Tab(t) => TabGeometry::new(ty.ui.size, ty.small.size, t.subtitle.is_some()).row_h,
+        Row::Pin(_) => TabGeometry::new(ty.ui.size, ty.small.size, false).row_h,
     }
 }
 
@@ -655,6 +685,10 @@ pub fn show(
                                 out.copy_cwd = Some(id);
                                 ui.close();
                             }
+                            if ui.button("Pin tab…").clicked() {
+                                out.pin_tab = Some(id);
+                                ui.close();
+                            }
                             ui.separator();
                             if ui.button("Move to next group").clicked() {
                                 out.move_group = Some((id, true));
@@ -671,6 +705,65 @@ pub fn show(
                             }
                             if ui.button("Close tab").clicked() {
                                 out.close = Some(id);
+                                ui.close();
+                            }
+                        });
+                    }
+                    Row::Pin(pin) => {
+                        let geom = TabGeometry::new(ty.ui.size, ty.small.size, false);
+                        let card = |x: f32| {
+                            Rect::from_min_max(
+                                pos2(x, rect.top() + GAP_Y),
+                                pos2(span.1 - CARD_INSET_R, rect.bottom() - GAP_Y),
+                            )
+                        };
+                        let (card, branch) = match bucket.as_mut() {
+                            Some(b) => {
+                                let x = b.spine_x();
+                                let card = card(x + BRANCH);
+                                let y = card.top() + geom.title_cy;
+                                b.branch(rect.top(), y);
+                                (card, Some((x, y, b.hue)))
+                            }
+                            None => (card(span.0 + 4.0), None),
+                        };
+                        if let Some((x, y, hue)) = branch {
+                            let (w, c) = if pin.active {
+                                (2.0, colors.accent)
+                            } else {
+                                (SPINE_W, tint(hue, 97))
+                            };
+                            painter.line_segment(
+                                [pos2(x, y), pos2(card.left() - 2.0, y)],
+                                Stroke::new(w, c),
+                            );
+                        }
+                        draw_pin(&painter, card, pin, colors, ty, resp.hovered());
+                        let name = pin.name.clone();
+                        if resp.clicked() {
+                            out.pin_open = Some((name.clone(), false));
+                        }
+                        if resp.middle_clicked() {
+                            out.pin_open = Some((name.clone(), true));
+                        }
+                        let resp = resp.on_hover_text(pin_tooltip(pin));
+                        resp.context_menu(|ui| {
+                            let open = if pin.open { "Go to tab" } else { "Open" };
+                            if ui.button(open).clicked() {
+                                out.pin_open = Some((name.clone(), false));
+                                ui.close();
+                            }
+                            if ui.button("Open another").clicked() {
+                                out.pin_open = Some((name.clone(), true));
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Edit…").clicked() {
+                                out.pin_edit = Some(name.clone());
+                                ui.close();
+                            }
+                            if ui.button("Unpin…").clicked() {
+                                out.pin_remove = Some(name.clone());
                                 ui.close();
                             }
                         });
@@ -702,6 +795,10 @@ pub fn show(
                     out.new_scratchpad = true;
                     ui.close();
                 }
+                if ui.button("New pinned session…").clicked() {
+                    out.pin_new = true;
+                    ui.close();
+                }
                 ui.separator();
                 if ui.button("Collapse all groups").clicked() {
                     out.collapse_all = true;
@@ -716,9 +813,73 @@ pub fn show(
     out
 }
 
+fn pin_tooltip(pin: &PinRow) -> String {
+    let mut lines = vec![pin.name.clone(), pin.summary.clone()];
+    if let Some(k) = &pin.key {
+        lines.push(k.clone());
+    }
+    lines.push(if pin.open {
+        "click: go to tab · middle-click: open another".into()
+    } else {
+        "click: open · right-click: edit or unpin".into()
+    });
+    lines.join("\n")
+}
+
+/// A pinned session: open/closed dot, name, kind chip. One line, the same card as a tab.
+fn draw_pin(
+    p: &egui::Painter,
+    card: Rect,
+    pin: &PinRow,
+    colors: &UiColors,
+    ty: &Typography,
+    hovered: bool,
+) {
+    let radius = CornerRadius::same(chrome::R_ROW - 2);
+    if pin.active {
+        p.rect_filled(card, radius, colors.surface_hi);
+    } else if hovered {
+        p.rect_filled(card, radius, tint(colors.fg, 12));
+    }
+    let geom = TabGeometry::new(ty.ui.size, ty.small.size, false);
+    let cy = card.top() + geom.title_cy;
+    // Filled while a tab from this pin is alive, hollow when clicking would start one.
+    let dot = pos2(card.left() + 6.0 + GUTTER / 2.0 + 2.0, cy);
+    if pin.open {
+        chrome::dot(p, dot, 3.5, colors.green, false);
+    } else {
+        p.circle_stroke(dot, 3.0, Stroke::new(1.3, colors.faint));
+    }
+    let text_x = card.left() + 6.0 + GUTTER + 8.0;
+    let mut right = card.right() - 9.0;
+    let chip = Chip::new(p, pin.kind, &ty.micro, pin.kind_color);
+    right -= chip.width();
+    chip.paint(p, right, cy);
+    right -= 6.0;
+    let (font, color) = if pin.active {
+        (&ty.strong, colors.fg)
+    } else if pin.open {
+        (&ty.ui, colors.fg.gamma_multiply(0.9))
+    } else {
+        (&ty.ui, colors.fg.gamma_multiply(0.7))
+    };
+    chrome::line(
+        p,
+        text_x,
+        cy,
+        &pin.name,
+        font,
+        color,
+        (right - text_x).max(0.0),
+    );
+}
+
 /// Everything the card would say if it had the width: the row's identity, unabbreviated.
 fn tab_tooltip(tab: &TabRow) -> String {
     let mut lines = vec![tab.title.clone()];
+    if let Some(pin) = &tab.pin {
+        lines.push(format!("pinned: {pin}"));
+    }
     if let Some(sub) = &tab.subtitle {
         lines.push(sub.clone());
     }
@@ -783,6 +944,18 @@ fn draw_tab(
     let mut right = card.right() - 9.0;
     chrome::dot(p, pos2(right - 3.5, title_cy), 3.5, dot_color, halo);
     right -= 7.0 + 7.0;
+    // A tab opened from a pin says so quietly; the PINNED box above is where it is managed.
+    if tab.pin.is_some() {
+        let size = ICON - 2.0;
+        chrome::icon(
+            p,
+            Icon::Pin,
+            pos2(right - size / 2.0, title_cy),
+            size,
+            colors.faint,
+        );
+        right -= size + 5.0;
+    }
     let mut urgent: Vec<Chip> = Vec::new();
     match tab.indicator {
         Indicator::Failure(code) => {

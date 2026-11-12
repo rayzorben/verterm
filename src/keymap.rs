@@ -37,6 +37,10 @@ pub enum Action {
     ClearScrollback,
     /// Per-tab BBS mode: decode CP437 and home the cursor on clear screen (see `crate::bbs`).
     ToggleBbsMode,
+    /// The pinned-session launcher (`crate::pins`).
+    OpenPinned,
+    /// Save the active tab as a pinned session.
+    PinTab,
     Quit,
 }
 
@@ -70,6 +74,8 @@ impl Action {
             Action::ScrollToBottom => "scroll_to_bottom".into(),
             Action::ClearScrollback => "clear_scrollback".into(),
             Action::ToggleBbsMode => "toggle_bbs_mode".into(),
+            Action::OpenPinned => "open_pinned".into(),
+            Action::PinTab => "pin_tab".into(),
             Action::Quit => "quit".into(),
         }
     }
@@ -102,6 +108,8 @@ impl Action {
             Action::ScrollToBottom => "Scroll to bottom".into(),
             Action::ClearScrollback => "Clear scrollback".into(),
             Action::ToggleBbsMode => "Toggle BBS mode (CP437)".into(),
+            Action::OpenPinned => "Open pinned session".into(),
+            Action::PinTab => "Pin current tab".into(),
             Action::Quit => "Quit verterm".into(),
         }
     }
@@ -133,6 +141,8 @@ impl Action {
             Action::ScrollToBottom,
             Action::ClearScrollback,
             Action::ToggleBbsMode,
+            Action::OpenPinned,
+            Action::PinTab,
             Action::Quit,
         ];
         v.extend((1..=9).map(Action::SelectTab));
@@ -365,6 +375,7 @@ impl Keymap {
             (Chord::new(Key::PageDown).shift(), ScrollPageDown),
             (Chord::new(Key::End).shift(), ScrollToBottom),
             (Chord::new(Key::B).ctrl().shift(), ToggleBbsMode),
+            (Chord::new(Key::O).ctrl().shift(), OpenPinned),
         ];
         let digits = [
             Key::Num1,
@@ -430,6 +441,22 @@ impl Keymap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pinned_session_actions() {
+        let km = Keymap::defaults();
+        assert_eq!(
+            km.lookup(Chord::new(Key::O).ctrl().shift()),
+            Some(Action::OpenPinned)
+        );
+        assert_eq!(Action::from_name("open_pinned"), Some(Action::OpenPinned));
+        assert_eq!(Action::from_name("pin_tab"), Some(Action::PinTab));
+        assert_eq!(
+            km.chord_for(Action::PinTab),
+            None,
+            "pin_tab is unbound by default"
+        );
+    }
 
     #[test]
     fn toggle_bbs_mode_has_a_default_chord_and_a_stable_name() {

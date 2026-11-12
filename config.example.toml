@@ -189,3 +189,5 @@ scroll_page_up = "Shift+PageUp"
 scroll_page_down = "Shift+PageDown"
 scroll_to_bottom = "Shift+End"
 toggle_bbs_mode = "Ctrl+Shift+B"  # CP437 + ANSI.SYS clear screen for this tab (BBS over telnet)
+open_pinned = "Ctrl+Shift+O"      # pinned-session launcher (sessions live in sessions.toml)
+# pin_tab = "..."                 # save the active tab as a pinned session (unbound by default)

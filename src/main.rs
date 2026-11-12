@@ -12,6 +12,7 @@
 //! - `hints`             fast-jump regex hinting (URL / path / IP / UUID / git hash)
 //! - `notify`            desktop notifications over the session D-Bus
 //! - `shell_integration` bash / zsh / fish hook scripts and their injection
+//! - `pins`              pinned sessions: sessions.toml, launch commands
 //! - `tabsearch`         finding a session by identity, or by what its scrollback contains
 //! - `themes`            the built-in colour schemes and how `[colors]` resolves into one
 //! - `ui`                eframe app: rail, terminal view, overlays, theme, fonts
@@ -25,6 +26,7 @@ mod keymap;
 mod links;
 mod notify;
 mod osc;
+mod pins;
 mod procscan;
 mod session;
 mod shell_integration;

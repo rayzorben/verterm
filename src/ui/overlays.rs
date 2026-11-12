@@ -17,6 +17,8 @@ use super::theme::{UiColors, tint};
 use crate::ai::{AiMsg, extract_command};
 use crate::config::AiPosition;
 use crate::keymap::{Action, Keymap};
+use crate::pins::{Pin, PinKind};
+use crate::session::TabId;
 
 // ---------------------------------------------------------------------------------------
 // AI overlay
@@ -882,6 +884,512 @@ pub fn show_prompt(
     }
 }
 
+// ---------------------------------------------------------------------------------------
+// Pinned sessions: launcher and edit form
+// ---------------------------------------------------------------------------------------
+
+/// One pin as the launcher lists it. Built by the App; nothing here reads the pin file.
+pub struct PinItem {
+    pub name: String,
+    pub kind: &'static str,
+    pub kind_color: egui::Color32,
+    pub summary: String,
+    pub key: Option<String>,
+    pub open: bool,
+}
+
+#[derive(Default)]
+pub struct PinLauncherState {
+    pub filter: String,
+    pub selected: usize,
+    /// Asking "unpin this?" for the named pin; the list is replaced by the question.
+    pub confirm_unpin: Option<String>,
+}
+
+pub enum PinLauncherOutcome {
+    None,
+    Close,
+    Open {
+        name: String,
+        new_copy: bool,
+    },
+    Edit(String),
+    /// Create a pin, its name prefilled from the filter text.
+    New(String),
+    Remove(String),
+}
+
+/// `key` pressed with Shift held, read off the event (see [`ctrl_pressed`] for why).
+fn shift_pressed(events: &[egui::Event], key: Key) -> bool {
+    events.iter().any(|e| {
+        matches!(
+            e,
+            egui::Event::Key {
+                key: k,
+                pressed: true,
+                modifiers,
+                ..
+            } if *k == key && modifiers.shift
+        )
+    })
+}
+
+/// The pins matching `filter`, best first, as indices into `items`.
+pub fn filter_pins(items: &[PinItem], filter: &str) -> Vec<usize> {
+    let mut scored: Vec<(usize, usize)> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, it)| {
+            let by_name = fuzzy_score(filter, &it.name);
+            let by_cmd = fuzzy_score(filter, &it.summary).map(|s| s + 500);
+            by_name.or(by_cmd).map(|s| (s, i))
+        })
+        .collect();
+    scored.sort();
+    scored.into_iter().map(|(_, i)| i).collect()
+}
+
+pub fn show_pin_launcher(
+    ctx: &egui::Context,
+    screen: Rect,
+    state: &mut PinLauncherState,
+    items: &[PinItem],
+    colors: &UiColors,
+    ty: &Typography,
+) -> PinLauncherOutcome {
+    let width = (screen.width() * 0.5).clamp(380.0, 640.0);
+
+    if let Some(name) = state.confirm_unpin.clone() {
+        let (yes, no) = ctx.input(|i| {
+            (
+                i.key_pressed(Key::Y) || i.key_pressed(Key::Enter),
+                i.key_pressed(Key::N) || i.key_pressed(Key::Escape),
+            )
+        });
+        let mut clicked = None;
+        Area::new(Id::new("verterm-pins"))
+            .order(Order::Foreground)
+            .anchor(Align2::CENTER_TOP, vec2(0.0, 64.0))
+            .show(ctx, |ui| {
+                chrome::card_frame(colors)
+                    .stroke(Stroke::new(1.0, tint(colors.vermilion, 110)))
+                    .show(ui, |ui| {
+                        ui.set_width(width);
+                        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                        ui.label(
+                            RichText::new(format!("Unpin \u{201c}{name}\u{201d}?"))
+                                .font(ty.strong.clone())
+                                .color(colors.fg),
+                        );
+                        ui.label(
+                            RichText::new("Any tab it opened stays open.")
+                                .font(ty.small.clone())
+                                .color(colors.muted),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.button("Unpin  (y)").clicked() {
+                                clicked = Some(true);
+                            }
+                            if ui.button("Keep  (n)").clicked() {
+                                clicked = Some(false);
+                            }
+                        });
+                    });
+            });
+        return match (clicked, yes, no) {
+            (Some(true), _, _) | (None, true, false) => PinLauncherOutcome::Remove(name),
+            (Some(false), _, _) | (None, _, true) => {
+                state.confirm_unpin = None;
+                PinLauncherOutcome::None
+            }
+            _ => PinLauncherOutcome::None,
+        };
+    }
+
+    let (events, esc, enter, up, down) = ctx.input(|i| {
+        (
+            i.events.clone(),
+            i.key_pressed(Key::Escape),
+            i.key_pressed(Key::Enter),
+            i.key_pressed(Key::ArrowUp),
+            i.key_pressed(Key::ArrowDown),
+        )
+    });
+    let shift_enter = shift_pressed(&events, Key::Enter);
+    let (edit, unpin, new) = (
+        ctrl_pressed(&events, Key::E),
+        ctrl_pressed(&events, Key::D),
+        ctrl_pressed(&events, Key::N),
+    );
+
+    let shown = filter_pins(items, &state.filter);
+    // The last row is always "New pinned session", so an empty list still has a target.
+    let rows = shown.len() + 1;
+    if down {
+        state.selected = (state.selected + 1) % rows;
+    }
+    if up {
+        state.selected = (state.selected + rows - 1) % rows;
+    }
+    state.selected = state.selected.min(rows - 1);
+
+    let row_h = (ty.ui.size * 2.2).round();
+    let mut clicked: Option<usize> = None;
+    Area::new(Id::new("verterm-pins"))
+        .order(Order::Foreground)
+        .anchor(Align2::CENTER_TOP, vec2(0.0, 64.0))
+        .show(ctx, |ui| {
+            chrome::card_frame(colors).show(ui, |ui| {
+                ui.set_width(width);
+                ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                ui.label(
+                    RichText::new("PINNED SESSIONS")
+                        .font(ty.micro.clone())
+                        .color(colors.accent),
+                );
+                let te = TextEdit::singleline(&mut state.filter)
+                    .font(ty.ui.clone())
+                    .desired_width(f32::INFINITY)
+                    .hint_text(
+                        RichText::new("open a pinned session…")
+                            .font(ty.ui.clone())
+                            .color(colors.faint),
+                    )
+                    .text_color(colors.fg)
+                    .frame(chrome::well_frame(colors))
+                    .lock_focus(true)
+                    .show(ui);
+                if te.response.changed() {
+                    state.selected = 0;
+                }
+                te.response.request_focus();
+                ui.add_space(2.0);
+                for row in 0..rows {
+                    let selected = row == state.selected;
+                    let (rect, resp) = ui.allocate_exact_size(
+                        vec2(ui.available_width(), row_h),
+                        egui::Sense::click(),
+                    );
+                    let p = ui.painter();
+                    let radius = CornerRadius::same(chrome::R_ROW);
+                    if selected {
+                        p.rect_filled(rect, radius, colors.accent_soft);
+                    } else if resp.hovered() {
+                        p.rect_filled(rect, radius, colors.surface_hi);
+                    }
+                    let cy = rect.center().y;
+                    let left = rect.left() + 12.0;
+                    let mut right = rect.right() - 10.0;
+                    if let Some(&idx) = shown.get(row) {
+                        let it = &items[idx];
+                        if let Some(k) = &it.key {
+                            let chip =
+                                Chip::solid(p, k, &ty.mono_small, colors.muted, colors.surface_alt);
+                            right -= chip.width();
+                            chip.paint(p, right, cy);
+                            right -= 8.0;
+                        }
+                        let chip = Chip::new(p, it.kind, &ty.micro, it.kind_color);
+                        right -= chip.width();
+                        chip.paint(p, right, cy);
+                        right -= 10.0;
+                        if it.open {
+                            chrome::dot(p, pos2(left + 3.0, cy), 3.5, colors.green, false);
+                        } else {
+                            p.circle_stroke(
+                                pos2(left + 3.0, cy),
+                                3.0,
+                                Stroke::new(1.3, colors.faint),
+                            );
+                        }
+                        let x = left + 14.0;
+                        let name = p.layout_no_wrap(
+                            it.name.clone(),
+                            if selected { ty.strong.clone() } else { ty.ui.clone() },
+                            colors.fg,
+                        );
+                        let name_w = name.size().x.min((right - x) * 0.5);
+                        chrome::line(
+                            p,
+                            x,
+                            cy,
+                            &it.name,
+                            if selected { &ty.strong } else { &ty.ui },
+                            colors.fg,
+                            name_w + 1.0,
+                        );
+                        let sx = x + name_w + 12.0;
+                        chrome::line(
+                            p,
+                            sx,
+                            cy,
+                            &it.summary,
+                            &ty.mono_small,
+                            colors.faint,
+                            (right - sx).max(0.0),
+                        );
+                    } else {
+                        let label = if state.filter.trim().is_empty() {
+                            "New pinned session…".to_string()
+                        } else {
+                            format!("New pinned session \u{201c}{}\u{201d}…", state.filter.trim())
+                        };
+                        let chip = Chip::solid(
+                            p,
+                            "Ctrl+N",
+                            &ty.mono_small,
+                            colors.muted,
+                            colors.surface_alt,
+                        );
+                        right -= chip.width();
+                        chip.paint(p, right, cy);
+                        chrome::line(
+                            p,
+                            left + 14.0,
+                            cy,
+                            &label,
+                            &ty.ui,
+                            colors.muted,
+                            (right - left - 24.0).max(0.0),
+                        );
+                    }
+                    if resp.clicked() {
+                        clicked = Some(row);
+                    }
+                }
+                ui.label(
+                    RichText::new(
+                        "Enter open · Shift+Enter open another · Ctrl+E edit · Ctrl+D unpin · Esc close",
+                    )
+                    .font(ty.small.clone())
+                    .color(colors.faint),
+                );
+            });
+        });
+
+    let selected_name = |row: usize| shown.get(row).map(|&i| items[i].name.clone());
+    if esc {
+        return PinLauncherOutcome::Close;
+    }
+    if new {
+        return PinLauncherOutcome::New(state.filter.trim().to_string());
+    }
+    if let Some(row) = clicked {
+        state.selected = row;
+    }
+    let row = state.selected;
+    let activate = clicked.is_some() || enter;
+    match selected_name(row) {
+        Some(name) if edit => PinLauncherOutcome::Edit(name),
+        Some(name) if unpin => {
+            state.confirm_unpin = Some(name);
+            PinLauncherOutcome::None
+        }
+        Some(name) if activate => PinLauncherOutcome::Open {
+            name,
+            new_copy: shift_enter,
+        },
+        None if activate => PinLauncherOutcome::New(state.filter.trim().to_string()),
+        _ => PinLauncherOutcome::None,
+    }
+}
+
+/// The add / edit form. Every field is a plain string while editing; the App turns it into
+/// a `Pin` and validates it when the user saves.
+pub struct PinEditState {
+    /// The pin being edited, or `None` when creating one.
+    pub original: Option<String>,
+    pub name: String,
+    pub kind: PinKind,
+    /// Host, container or command, depending on `kind`.
+    pub target: String,
+    pub dir: String,
+    pub key: String,
+    pub autostart: bool,
+    pub exit_with_command: bool,
+    /// Why the last save was refused.
+    pub error: Option<String>,
+    /// "Pin tab": the tab the form was prefilled from, and what it was prefilled with.
+    pub from_tab: Option<(TabId, Pin)>,
+    focused: bool,
+}
+
+impl PinEditState {
+    pub fn new(original: Option<String>, pin: &Pin) -> Self {
+        Self {
+            original,
+            name: pin.name.clone(),
+            kind: pin.kind,
+            target: pin.target_text().unwrap_or_default().to_string(),
+            dir: pin.dir.clone().unwrap_or_default(),
+            key: pin.key.clone().unwrap_or_default(),
+            autostart: pin.autostart,
+            exit_with_command: pin.exit_with_command,
+            error: None,
+            from_tab: None,
+            focused: false,
+        }
+    }
+
+    pub fn to_pin(&self) -> Pin {
+        let target = Some(self.target.clone());
+        Pin {
+            name: self.name.clone(),
+            kind: self.kind,
+            dir: Some(self.dir.clone()),
+            target: target.clone(),
+            container: target.clone(),
+            command: target,
+            autostart: self.autostart,
+            exit_with_command: self.exit_with_command,
+            key: Some(self.key.clone()),
+        }
+        .normalized()
+    }
+}
+
+pub enum PinEditOutcome {
+    None,
+    Save,
+    Cancel,
+}
+
+pub fn show_pin_edit(
+    ctx: &egui::Context,
+    screen: Rect,
+    state: &mut PinEditState,
+    colors: &UiColors,
+    ty: &Typography,
+) -> PinEditOutcome {
+    let (esc, enter) = ctx.input(|i| (i.key_pressed(Key::Escape), i.key_pressed(Key::Enter)));
+    let width = (screen.width() * 0.5).clamp(380.0, 600.0);
+    let mut save = false;
+    let mut cancel = false;
+    Area::new(Id::new("verterm-pin-edit"))
+        .order(Order::Foreground)
+        .anchor(Align2::CENTER_TOP, vec2(0.0, 64.0))
+        .show(ctx, |ui| {
+            chrome::card_frame(colors).show(ui, |ui| {
+                ui.set_width(width);
+                ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                let title = if state.original.is_some() {
+                    "EDIT PINNED SESSION"
+                } else {
+                    "NEW PINNED SESSION"
+                };
+                ui.label(
+                    RichText::new(title)
+                        .font(ty.micro.clone())
+                        .color(colors.accent),
+                );
+                let label_w = ty.ui.size * 6.0;
+                let field = |ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str| {
+                    ui.horizontal(|ui| {
+                        ui.add_sized(
+                            vec2(label_w, ty.ui.size * 1.6),
+                            egui::Label::new(
+                                RichText::new(label)
+                                    .font(ty.small.clone())
+                                    .color(colors.muted),
+                            ),
+                        );
+                        TextEdit::singleline(text)
+                            .font(ty.mono.clone())
+                            .desired_width(f32::INFINITY)
+                            .hint_text(
+                                RichText::new(hint)
+                                    .font(ty.mono.clone())
+                                    .color(colors.faint),
+                            )
+                            .text_color(colors.fg)
+                            .frame(chrome::well_frame(colors))
+                            .show(ui)
+                            .response
+                    })
+                    .inner
+                };
+                let name = field(ui, "name", &mut state.name, "orohost");
+                if !state.focused {
+                    name.request_focus();
+                    state.focused = true;
+                }
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        vec2(label_w, ty.ui.size * 1.6),
+                        egui::Label::new(
+                            RichText::new("kind")
+                                .font(ty.small.clone())
+                                .color(colors.muted),
+                        ),
+                    );
+                    for k in PinKind::ALL {
+                        if ui
+                            .selectable_label(
+                                state.kind == k,
+                                RichText::new(k.label()).font(ty.small.clone()),
+                            )
+                            .clicked()
+                        {
+                            state.kind = k;
+                        }
+                    }
+                });
+                if let Some(label) = state.kind.target_label() {
+                    let hint = match state.kind {
+                        PinKind::Ssh => "rayben@orohost",
+                        PinKind::Container => "sedanos",
+                        _ => "journalctl -f",
+                    };
+                    field(ui, label, &mut state.target, hint);
+                }
+                let dir_hint = if state.kind == PinKind::Local {
+                    "~/code/mudengine"
+                } else {
+                    "~  (local start directory)"
+                };
+                field(ui, "directory", &mut state.dir, dir_hint);
+                field(ui, "key", &mut state.key, "Alt+Shift+1  (optional)");
+                ui.horizontal(|ui| {
+                    ui.add_space(label_w + ui.spacing().item_spacing.x);
+                    ui.checkbox(
+                        &mut state.autostart,
+                        RichText::new("open when verterm starts").font(ty.small.clone()),
+                    );
+                    if state.kind != PinKind::Local {
+                        ui.checkbox(
+                            &mut state.exit_with_command,
+                            RichText::new("close tab when it exits").font(ty.small.clone()),
+                        );
+                    }
+                });
+                let preview = state.to_pin();
+                ui.label(
+                    RichText::new(format!("runs: {}", preview.summary()))
+                        .font(ty.mono_small.clone())
+                        .color(colors.faint),
+                );
+                if let Some(err) = &state.error {
+                    ui.label(RichText::new(err).font(ty.small.clone()).color(colors.red));
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Save  (Enter)").clicked() {
+                        save = true;
+                    }
+                    if ui.button("Cancel  (Esc)").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        });
+    if esc || cancel {
+        PinEditOutcome::Cancel
+    } else if enter || save {
+        PinEditOutcome::Save
+    } else {
+        PinEditOutcome::None
+    }
+}
+
 /// Small transient messages in the bottom-right corner.
 pub fn show_toasts(
     ctx: &egui::Context,
@@ -926,6 +1434,48 @@ pub fn show_toasts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn item(name: &str, summary: &str) -> PinItem {
+        PinItem {
+            name: name.into(),
+            kind: "ssh",
+            kind_color: egui::Color32::WHITE,
+            summary: summary.into(),
+            key: None,
+            open: false,
+        }
+    }
+
+    #[test]
+    fn pin_filter_prefers_names_over_commands() {
+        let items = [
+            item("logs", "ssh orohost journalctl -f"),
+            item("orohost", "ssh rayben@orohost"),
+            item("mudengine", "~/code/mudengine"),
+        ];
+        assert_eq!(filter_pins(&items, "oro"), vec![1, 0]);
+        assert_eq!(filter_pins(&items, ""), vec![0, 1, 2]);
+        assert!(filter_pins(&items, "zzz").is_empty());
+    }
+
+    #[test]
+    fn the_edit_form_keeps_only_the_kinds_field() {
+        let mut pin = Pin {
+            name: "sedanos".into(),
+            kind: PinKind::Container,
+            container: Some("sedanos".into()),
+            ..Pin::default()
+        };
+        let mut form = PinEditState::new(None, &pin);
+        assert_eq!(form.target, "sedanos");
+        assert_eq!(form.to_pin(), pin);
+        form.kind = PinKind::Ssh;
+        form.target = "rayben@orohost".into();
+        pin = form.to_pin();
+        assert_eq!(pin.target.as_deref(), Some("rayben@orohost"));
+        assert_eq!(pin.container, None);
+        assert_eq!(pin.launch_command().as_deref(), Some("ssh rayben@orohost"));
+    }
 
     fn key_event(key: Key, pressed: bool, ctrl: bool) -> egui::Event {
         egui::Event::Key {

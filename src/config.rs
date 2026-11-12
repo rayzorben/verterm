@@ -446,13 +446,25 @@ impl Config {
     /// inotify-instance limit) or misses an event (network filesystem). `path` need not exist
     /// yet — creating it later is picked up the same way.
     pub fn spawn_watcher(path: PathBuf, ctx: egui::Context) -> mpsc::Receiver<Config> {
-        let (tx, rx) = mpsc::channel();
-        std::thread::Builder::new()
-            .name("config-watch".into())
-            .spawn(move || watch_loop(path, tx, ctx))
-            .expect("spawn config-watch thread");
-        rx
+        spawn_file_watcher(path, "config-watch", |p| Config::load(Some(p)), ctx)
     }
+}
+
+/// Watch `path` on a background thread named `name` and send each successful `load` of it
+/// over the returned channel (see [`Config::spawn_watcher`] for the mechanics). Shared by
+/// `config.toml` and the pinned-sessions file.
+pub fn spawn_file_watcher<T: Send + 'static>(
+    path: PathBuf,
+    name: &str,
+    load: fn(&Path) -> Result<T>,
+    ctx: egui::Context,
+) -> mpsc::Receiver<T> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || watch_loop(path, load, tx, ctx))
+        .expect("spawn file-watch thread");
+    rx
 }
 
 // ---------------------------------------------------------------------------------------
@@ -547,7 +559,12 @@ fn classify_wake(r: Result<(), mpsc::RecvTimeoutError>) -> Wake {
     }
 }
 
-fn watch_loop(path: PathBuf, tx: mpsc::Sender<Config>, ctx: egui::Context) {
+fn watch_loop<T>(
+    path: PathBuf,
+    load: fn(&Path) -> Result<T>,
+    tx: mpsc::Sender<T>,
+    ctx: egui::Context,
+) {
     let (fs_tx, fs_rx) = mpsc::channel::<()>();
     let watch_dir = path
         .parent()
@@ -598,15 +615,15 @@ fn watch_loop(path: PathBuf, tx: mpsc::Sender<Config>, ctx: egui::Context) {
             current = after;
         }
         last_mtime = current;
-        match Config::load(Some(&path)) {
-            Ok(cfg) => {
-                tracing::info!(path = %path.display(), "config reloaded");
-                if tx.send(cfg).is_err() {
+        match load(&path) {
+            Ok(value) => {
+                tracing::info!(path = %path.display(), "file reloaded");
+                if tx.send(value).is_err() {
                     return; // App is gone.
                 }
                 ctx.request_repaint();
             }
-            Err(e) => tracing::warn!("config reload skipped: {e:#}"),
+            Err(e) => tracing::warn!("reload of {} skipped: {e:#}", path.display()),
         }
     }
 }

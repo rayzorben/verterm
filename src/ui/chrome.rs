@@ -314,6 +314,8 @@ pub enum Icon {
     Shield,
     /// An ephemeral scratchpad.
     Bolt,
+    /// A pinned session (the rail's PINNED box).
+    Pin,
 }
 
 /// Draw `icon` centred on `center`, sized to fit a `size`-wide box.
@@ -425,6 +427,19 @@ pub fn icon(p: &Painter, icon: Icon, center: Pos2, size: f32, color: Color32) {
                 ],
                 s,
             );
+        }
+        Icon::Pin => {
+            // A push-pin: round head, a flat collar, and the needle below it.
+            let head = pos2(cx, cy - h * 0.42);
+            p.circle_stroke(head, h * 0.42, s);
+            p.line_segment(
+                [
+                    pos2(cx - h * 0.62, cy + h * 0.12),
+                    pos2(cx + h * 0.62, cy + h * 0.12),
+                ],
+                s,
+            );
+            p.line_segment([pos2(cx, cy + h * 0.12), pos2(cx, cy + h)], s);
         }
     }
 }

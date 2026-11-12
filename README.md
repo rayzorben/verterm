@@ -88,6 +88,10 @@ Requires a Wayland (or X11) session with Vulkan drivers, fontconfig (`fc-match`)
   drawn into them line up. It switches on by itself while `telnet` is the foreground job
   (`bbs_auto_telnet`), and `Ctrl+Shift+B` toggles it for anything else (telnet inside ssh, `nc`); a
   `bbs cp437` chip in the status bar shows it is on. Typed text is sent as CP437 too.
+- **Pinned sessions** — saved ways to open a tab: a folder (`~/code/mudengine`), an SSH host
+  (`ssh rayben@orohost`), a container (`distrobox enter sedanos`) or any command. They sit in a
+  PINNED box at the top of the rail (filled dot = open, click to go to it; hollow = click to start it),
+  in a launcher on `Ctrl+Shift+O`, and optionally on a chord of their own. See [Pinned sessions](#pinned-sessions).
 - **Command palette** (`Ctrl+Shift+P`), scratchpad prompt (`Ctrl+Shift+E`), font zoom, status bar.
 
 ## Default keybindings
@@ -102,6 +106,7 @@ Requires a Wayland (or X11) session with Vulkan drivers, fontconfig (`fc-match`)
 | `Alt+F` | find a session (name, cwd, host, or its output) | `Ctrl+Shift+B` | BBS mode for this tab (CP437) |
 | `Shift+PageUp/PageDown/End` | scroll | `Ctrl+Shift+P` | command palette |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | copy / paste (fixed) | `Ctrl+Shift+=` / `-` / `0` | font size |
+| `Ctrl+Shift+O` | pinned-session launcher | *(unbound)* `pin_tab` | pin the current tab |
 
 Rebind anything in `[keys]` (`action = "Ctrl+Shift+T"`, `action_alt = …` for a second chord). Vi mode keys:
 `h j k l w b e W B E 0 $ ^ H M L % { } g G`, `Ctrl+B/F/U/D/Y/E`, `v V Ctrl+V`, `y`/Enter, `/ ? n N`, `Esc`, `i`/`q`.
@@ -110,7 +115,8 @@ Mouse still works for selection (double = word, triple = line), wheel scrolling 
 under the pointer (open or copy it without entering hint mode), select all, search, hints, Ask AI, a new
 tab in the same directory, clear scrollback and close tab — plus *Open* and *Copy link address* when the
 pointer is on a hyperlink, both labelled with the target rather than the link text; on a tab row, activate, copy the working
-directory, move between groups, new tab and close tab; on empty rail space, new tab/scratchpad and
+directory, pin it, move between groups, new tab and close tab; on a pinned session, open / go to it,
+open another, edit or unpin; on empty rail space, new tab/scratchpad, new pinned session and
 collapse or expand all groups. Middle-clicking a tab closes it; double-clicking empty space on the tab
 rail opens a new tab.
 
@@ -126,6 +132,47 @@ rail opens a new tab.
 | `[hyperlinks]` | `enabled`, `activate` (`click` \| `ctrl-click` \| `none`), `underline` / `color` (`always` \| `hover` \| `never`), `detect`, `detect_www`, `detect_emails`, `schemes` (the allowlist — a scheme not listed is never opened), `opener` (argv; the URI is appended) |
 | `[colors]` | `theme` (built-in scheme, see below), plus optional per-key overrides: `foreground`, `background`, `cursor`, `selection`, `accent` (chrome accent), `normal[8]`, `bright[8]` |
 | `[keys]` | `action = "Chord"` |
+
+### Pinned sessions
+Kept in `$XDG_CONFIG_HOME/verterm/sessions.toml`, apart from `config.toml` because verterm writes it
+(verterm never rewrites the file you maintain by hand). It is still plain TOML, reloaded live when you
+edit it; comments are not kept when verterm saves.
+
+```toml
+[[session]]
+name = "mudengine"
+kind = "local"               # local | ssh | container | command
+dir  = "~/code/mudengine"
+autostart = true             # open when verterm starts
+key  = "Alt+Shift+1"         # optional chord; a chord already bound to an action is refused
+
+[[session]]
+name   = "orohost"
+kind   = "ssh"
+target = "rayben@orohost"    # runs: ssh rayben@orohost (shell text, so "-p 2222 me@host" works)
+
+[[session]]
+name      = "sedanos"
+kind      = "container"
+container = "sedanos"        # runs: distrobox enter sedanos
+
+[[session]]
+name    = "logs"
+kind    = "command"
+command = "journalctl -f"
+exit_with_command = true     # close the tab when it ends instead of returning to the shell
+```
+
+Add, edit and remove them without touching the file: **Pin tab…** on a tab's right-click menu (prefilled
+from what the tab is — its ssh host, container or project folder), **New pinned session…** on empty rail
+space, or `Ctrl+Shift+O` → `Ctrl+N`. In the launcher, `Enter` opens (or goes to the open tab),
+`Shift+Enter` opens another, `Ctrl+E` edits, `Ctrl+D` unpins after a `y`/`n` check. Unpinning never
+closes a tab.
+
+A pin always starts your normal shell (with shell integration) and types its command at the first
+prompt, so the tab is classified like any ssh or container session, and a dropped connection leaves you
+at a local prompt instead of closing the tab. `dir` is the local start directory for every kind. When any
+pin has `autostart`, those pins replace the plain first shell, unless `-d` or `-e` asked for one.
 
 ### Themes
 `theme = "<name>"` under `[colors]` restyles the **whole client**, not just the grid: the rail's
